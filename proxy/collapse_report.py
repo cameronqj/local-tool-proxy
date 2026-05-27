@@ -23,6 +23,10 @@ from typing import Dict, List
 COLLAPSE_LINE_RE = re.compile(
     r"\[(?P<trace>gptfixes-[a-f0-9]+)\] collapse: category=(?P<cat>\w+) signals=\[(?P<signals>[^\]]*)\]"
 )
+# Also support the slightly different format used in some log examples
+COLLAPSE_LINE_RE2 = re.compile(
+    r"\[(?P<trace>gptfixes-[^\]]+)\] collapse: category=(?P<cat>\w+)"
+)
 
 
 def parse_log_lines(lines: List[str]) -> Dict[str, any]:
@@ -32,17 +36,20 @@ def parse_log_lines(lines: List[str]) -> Dict[str, any]:
     for line in lines:
         m = COLLAPSE_LINE_RE.search(line)
         if not m:
+            m = COLLAPSE_LINE_RE2.search(line)
+        if not m:
             continue
+
         trace = m.group("trace")
         cat = m.group("cat")
-        signals_raw = m.group("signals")
+        signals_raw = m.group("signals", "") if "signals" in m.groupdict() else ""
 
         reports[trace]["categories"][cat] += 1
-        reports[trace]["traces"] = 1  # count unique traces
+        reports[trace]["traces"] = 1
 
         if signals_raw.strip():
             for sig in signals_raw.split(","):
-                sig = sig.strip().strip("'\"")
+                sig = sig.strip().strip("'\"[] ")
                 if sig:
                     reports[trace]["signals"][sig] += 1
 

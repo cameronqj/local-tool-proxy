@@ -70,7 +70,18 @@ logger = logging.getLogger("local-tool-proxy")
 # Global state - defined early so lifespan and other top-level code can reference them
 OLLAMA_BASE: str = "http://localhost:11434/v1"
 COMPAT_MODELS: Set[str] = set()
+MODE: str = "compat"  # compat | observe | stabilize  (per nextgrok.prompt)
 CLIENT = httpx.AsyncClient(timeout=600.0)  # long timeout for generation
+
+# Simple in-memory per-trace state for drift scoring (Phase 1 Observe)
+# Keyed by trace_id. Reset on process restart. Good enough for single-run evaluation.
+from collections import defaultdict
+TRACE_DRIFT: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
+    "tool_streak": 0,
+    "turns_since_last_tool": 0,
+    "total_tool_turns": 0,
+    "collapse_events": 0,
+})
 
 
 @asynccontextmanager
@@ -79,6 +90,7 @@ async def lifespan(app: FastAPI):
     logger.info("local-tool-proxy starting")
     logger.info(f"  upstream: {OLLAMA_BASE}")
     logger.info(f"  compat models: {sorted(COMPAT_MODELS) or '(none)'}")
+    logger.info(f"  mode: {MODE}")
     logger.info("  Goal: Make stock OpenCode (and similar harnesses) work with small local models")
     logger.info("  via clean in-line translation of tool calling output.")
     yield
@@ -205,11 +217,13 @@ async def list_models():
 @app.get("/health")
 @app.get("/v1/health")
 async def health():
-    """Simple health check for scripts / monitoring before launching OpenCode."""
+    """Health + NextGrok status (Phase 1+)."""
     return {
         "status": "ok",
         "upstream": OLLAMA_BASE,
         "compat_models": sorted(COMPAT_MODELS),
+        "mode": MODE,
+        "active_traces": len(TRACE_DRIFT),
     }
 
 
@@ -308,7 +322,7 @@ async def _handle_tool_request_for_compat_model(
         pass
 
     trace_id = f"gptfixes-{uuid.uuid4().hex[:12]}"
-    logger.info(f"[{trace_id}] COMPAT TOOL PATH for {model} — forcing non-stream + rewrite attempt (rigid={is_rigid})")
+    logger.info(f"[{trace_id}] COMPAT TOOL PATH for {model} — forcing non-stream + rewrite attempt (rigid={is_rigid}) mode={MODE}")
 
     # Phase 3 improvement: respect per-model preference for forcing non-stream on tool requests
     # (for now we key off the compat model list; later this can come from profiles)
@@ -323,7 +337,7 @@ async def _handle_tool_request_for_compat_model(
         tools_count = 0
         stream_requested = None
 
-    logger.info(f"[{trace_id}] request: model={model} mode=compat stream_requested={stream_requested} tools_count={tools_count} rigid={is_rigid}")
+    logger.info(f"[{trace_id}] request: model={model} mode={MODE} stream_requested={stream_requested} tools_count={tools_count} rigid={is_rigid}")
 
     # Force non-streaming for reliability (Phase 3)
     try:
@@ -388,12 +402,21 @@ async def _handle_tool_request_for_compat_model(
             if tool_calls:
                 logger.info(f"[{trace_id}] ✓ REWROTE tool call(s) for stock OpenCode: { [t['function']['name'] for t in tool_calls] }")
 
-                # Phase 0: even on rewrite success, note the category for baseline data
+                # Phase 1: classification + drift even on successful rewrite path
                 try:
-                    category = classify_from_openai_response(data, had_tools_in_request=True)
-                    if category != "tool_calls":
-                        signals = get_collapse_signals(category, had_tools_in_request=True)
-                        logger.info(f"[{trace_id}] collapse_before_rewrite: category={category} signals={signals}")
+                    pre_category = classify_from_openai_response(data, had_tools_in_request=True)
+                    if pre_category != "tool_calls":
+                        pre_signals = get_collapse_signals(pre_category, had_tools_in_request=True)
+                        logger.info(f"[{trace_id}] collapse_before_rewrite: category={pre_category} signals={pre_signals}")
+
+                    # Treat rewrite success as a tool turn for drift purposes
+                    state = TRACE_DRIFT[trace_id]
+                    state["tool_streak"] += 1
+                    state["turns_since_last_tool"] = 0
+                    state["total_tool_turns"] += 1
+
+                    if MODE in ("observe", "stabilize"):
+                        logger.info(f"[{trace_id}] drift: tool_streak={state['tool_streak']} total_tool_turns={state['total_tool_turns']} (after rewrite, mode={MODE})")
                 except Exception:
                     pass
 
@@ -413,13 +436,42 @@ async def _handle_tool_request_for_compat_model(
     # No rewrite happened — return original
     logger.info(f"[{trace_id}] No rewrite needed for {model} (rigid={is_rigid})")
 
-    # Phase 0 instrumentation: classify the response for collapse analysis
+    # === Phase 1: Observe mode instrumentation ===
+    category = "unclear"
+    signals: list[str] = []
+    drift_score: dict[str, Any] = {}
+
     try:
         category = classify_from_openai_response(data, had_tools_in_request=True)
         signals = get_collapse_signals(category, had_tools_in_request=True)
+
+        # Update simple per-trace drift state (best-effort, in-memory)
+        state = TRACE_DRIFT[trace_id]
+        if category == "tool_calls":
+            state["tool_streak"] += 1
+            state["turns_since_last_tool"] = 0
+            state["total_tool_turns"] += 1
+        else:
+            state["tool_streak"] = 0
+            state["turns_since_last_tool"] += 1
+            state["collapse_events"] += 1
+
+        drift_score = {
+            "tool_streak": state["tool_streak"],
+            "turns_since_last_tool": state["turns_since_last_tool"],
+            "total_tool_turns": state["total_tool_turns"],
+            "collapse_events": state["collapse_events"],
+        }
+
+        # Always log classification (Phase 0+)
         logger.info(f"[{trace_id}] collapse: category={category} signals={signals}")
+
+        # In observe or higher, log drift score on every tool turn
+        if MODE in ("observe", "stabilize"):
+            logger.info(f"[{trace_id}] drift: {drift_score}  (mode={MODE})")
+
     except Exception as e:
-        logger.debug(f"Collapse classification failed: {e}")
+        logger.debug(f"Collapse/drift classification failed: {e}")
 
     content = upstream.content
     await upstream.aclose()
@@ -433,21 +485,24 @@ async def _handle_tool_request_for_compat_model(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="local-tool-proxy for small local models")
+    parser = argparse.ArgumentParser(description="local-tool-proxy / gptfixes (NextGrok)")
     parser.add_argument("--port", type=int, default=9000, help="Port to listen on")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind")
     parser.add_argument("--ollama-base", default="http://localhost:11434/v1",
                         help="Base URL of the real Ollama OpenAI-compatible endpoint")
     parser.add_argument("--compat-models", default="gemma4:e4b-mlx,gemma4:e2b-mlx,gpt-oss:20b",
                         help="Comma-separated list of model substrings that get special small-model handling")
+    parser.add_argument("--mode", default="compat", choices=["compat", "observe", "stabilize"],
+                        help="NextGrok mode: compat (default, format repair only), observe (diagnostics + drift), stabilize (experimental interventions)")
     args = parser.parse_args()
 
-    global OLLAMA_BASE, COMPAT_MODELS
+    global OLLAMA_BASE, COMPAT_MODELS, MODE
     OLLAMA_BASE = args.ollama_base
     COMPAT_MODELS = {m.strip().lower() for m in args.compat_models.split(",") if m.strip()}
+    MODE = args.mode
 
     import uvicorn
-    logger.info(f"Starting local-tool-proxy on {args.host}:{args.port}")
+    logger.info(f"Starting local-tool-proxy on {args.host}:{args.port}  mode={MODE}")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 
