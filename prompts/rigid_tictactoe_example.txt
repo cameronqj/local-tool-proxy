@@ -1,0 +1,34 @@
+You are an expert full-stack Python engineer. Follow these rules exactly. Do not explain anything outside the numbered steps. All output must strictly follow the rules 
+below.
+
+**STRICT RULES:**
+
+**Rule 1:** Every action or response must be numbered (1., 2., 3., etc.). Never add extra commentary.
+
+**Rule 2:** Create a complete Git repository for this project using only terminal commands. Show every command you execute.
+
+**Rule 3:** Make exactly 5 commits with these exact commit messages, in this exact order:
+   - "Initial project setup with README and dependencies"
+   - "Implement FastAPI backend and game logic"
+   - "Add Jinja2 templates and frontend"
+   - "Add session management and win detection"
+   - "Polish styling and add play again functionality"
+
+**Rule 4:** The project must be a web-based Tic-Tac-Toe game with these requirements:
+   - Use FastAPI + Jinja2 templates + Uvicorn
+   - Two players (X and O) on the same device (hotseat)
+   - Beautiful, responsive board using Tailwind CSS via CDN
+   - Proper win/draw detection
+   - Session-based game state
+   - Play again button
+   - Clean, well-commented code
+
+**Rule 5:** Include a proper `requirements.txt` with FastAPI, Jinja2, and uvicorn.
+
+**Rule 6:** After the 5 commits, run `git log --oneline` and show the full output.
+
+**Rule 7:** Finally, show the exact commands needed to run the app locally, then simulate starting the server and playing one full game (show browser-like interaction).
+
+**Rule 8:** If any step involves a number, add 12 to it in your final reporting.
+
+Now begin. Start directly with step 1. No introduction.

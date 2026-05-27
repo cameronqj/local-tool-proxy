@@ -1,0 +1,543 @@
+# gptfixes.prompt
+
+You are implementing `gptfixes`, a lightweight open-source OpenAI-compatible proxy
+that sits in front of Ollama and improves local-model tool-calling reliability.
+
+The product goal is narrow by default:
+
+> Make small/local models that are already trying to use tools produce wire-format
+> output that ordinary OpenAI-compatible harnesses can consume.
+
+The default proxy must remain transparent. It should not become a full agent
+controller, task runner, git orchestrator, or hidden workflow manager. Optional
+agent-stabilization features may exist behind explicit flags, but the core
+release should be a compatibility layer.
+
+## Background
+
+Current local model failure modes observed:
+
+1. Tool calls appear as JSON or XML-like text in `message.content` instead of
+   proper OpenAI `tool_calls`.
+2. Streaming deltas are malformed, incomplete, or include extra fields that
+   harnesses reject.
+3. Models use legacy `function_call` or nonstandard names such as `tool`,
+   `parameters`, `input`, or `args`.
+4. Tool arguments are almost valid JSON but contain single quotes, unquoted keys,
+   trailing commas, or fenced-code wrapping.
+5. Small models may use a tool successfully for several turns and then drift into
+   explanatory prose before the task is complete. This is agent-loop collapse,
+   not just wire-format failure.
+6. Some models have tool ontology mismatches. For example, a model may call
+   trained-in tool names instead of the names supplied by the harness.
+
+The core proxy should solve 1-4 first. It may expose instrumentation for 5 and 6,
+but should avoid silently taking over execution semantics by default.
+
+## Non-Goals For The Default Mode
+
+- Do not execute shell commands, read files, write files, make commits, or run
+  tests inside the proxy.
+- Do not decompose user tasks into hidden substeps by default.
+- Do not rewrite user prompts aggressively by default.
+- Do not assume the task is a coding task.
+- Do not require harness-specific patches.
+- Do not require users to change their normal OpenAI-compatible client code
+  beyond pointing `base_url` at the proxy.
+
+## Architecture
+
+Use a small Python FastAPI/httpx service initially:
+
+- `proxy/server.py`: request routing, config, model matching, response handling.
+- `proxy/rewriters.py`: pure parsing and normalization logic.
+- `proxy/streaming.py`: SSE-specific reconstruction logic once it grows beyond
+  the current accumulator.
+- `proxy/config.py`: typed runtime config and model profiles.
+- `proxy/observability.py`: structured logging, trace ids, redaction helpers.
+- `proxy/profiles/*.json`: model-specific compatibility profiles.
+- `tests/`: deterministic unit and integration tests with mock upstreams.
+
+Keep the rewriter functions pure and heavily tested. The server should do I/O;
+the rewriter should accept Python dictionaries/strings and return normalized
+OpenAI-compatible data structures.
+
+## Public Modes
+
+Implement three modes:
+
+1. `compat`
+   - Default.
+   - Transparent proxy plus tool-call normalization.
+   - No task decomposition.
+   - No agent-loop intervention except format repair.
+
+2. `observe`
+   - Same behavior as `compat`.
+   - Adds diagnostics for no-tool assistant turns, likely malformed tool intent,
+     tool-name mismatches, and repeated failed tool attempts.
+   - Must not alter prompts or force behavior.
+
+3. `stabilize`
+   - Explicit experimental mode.
+   - May apply limited, logged interventions such as one retry when a tool-using
+     request returns plain prose that looks like an unfinished task.
+   - Must be clearly marked experimental in README and logs.
+
+Do not ship hidden planner behavior in `compat`.
+
+## Configuration
+
+Add CLI/config support for:
+
+- `--host`
+- `--port`
+- `--ollama-base`
+- `--mode compat|observe|stabilize`
+- `--compat-models`
+- `--profile gemma4|qwen|gpt-oss|auto`
+- `--force-non-stream-tools true|false`
+- `--log-level`
+- `--trace-dir`
+- `--redact-args true|false`
+- `--max-buffer-bytes`
+- `--max-rewrite-retries`
+
+Support environment variables for container use:
+
+- `GPTFIXES_HOST`
+- `GPTFIXES_PORT`
+- `GPTFIXES_OLLAMA_BASE`
+- `GPTFIXES_MODE`
+- `GPTFIXES_COMPAT_MODELS`
+- `GPTFIXES_PROFILE`
+- `GPTFIXES_TRACE_DIR`
+
+Config precedence:
+
+1. CLI args
+2. Environment variables
+3. Config file
+4. Defaults
+
+## Model Profiles
+
+Represent profiles as simple data:
+
+```json
+{
+  "name": "gemma4",
+  "match": ["gemma4", "gemma-4", "e4b", "e2b"],
+  "force_non_stream_tools": true,
+  "parsers": ["openai_tool_calls", "json_content", "xml_content", "raw_function_call", "single_tool_text"],
+  "argument_repairs": ["strip_fences", "single_quotes", "unquoted_keys", "trailing_commas"],
+  "tool_name_aliases": {}
+}
+```
+
+Start with built-in profiles:
+
+- `generic`
+- `gemma4`
+- `qwen`
+- `gpt-oss`
+
+The `gpt-oss` profile should initially focus on detection/logging of ontology
+mismatch. Do not auto-map dangerous tool names unless the mapping is explicit in
+config.
+
+## Phase 1: Product Boundary And Packaging
+
+Deliverables:
+
+- Rename/project-frame from `local-tool-proxy` to `gptfixes` or keep package name
+  stable while exposing `gptfixes` as the command.
+- Add a root README section describing the promise:
+  "OpenAI-compatible tool-call repair proxy for Ollama."
+- Add installation docs:
+  - `pip install -e .`
+  - `gptfixes --ollama-base http://localhost:11434/v1`
+- Add `pyproject.toml` with console script:
+  - `gptfixes = "proxy.server:main"` initially, or move package to
+    `gptfixes.server:main`.
+- Preserve the current `python3 -m proxy.server` path until the package rename is
+  complete.
+
+Acceptance criteria:
+
+- `gptfixes --help` works.
+- `gptfixes --port 9000 --ollama-base http://localhost:11434/v1` starts.
+- `/health` returns mode, upstream, enabled profiles, and compat models.
+- `/v1/models` returns configured model ids.
+
+## Phase 2: Rewrite Engine Hardening
+
+Refactor `rewriters.py` into small pure functions:
+
+- `extract_known_tool_names(request_payload) -> list[str]`
+- `normalize_tool_call_object(obj, known_tool_names) -> ToolCall | None`
+- `parse_json_content(text, known_tool_names) -> list[ToolCall]`
+- `parse_xml_content(text, known_tool_names) -> list[ToolCall]`
+- `parse_raw_function_call(text, known_tool_names) -> list[ToolCall]`
+- `parse_single_tool_text(text, known_tool_names) -> list[ToolCall]`
+- `repair_jsonish(text, repairs) -> str`
+- `synthesize_chat_completion(original_response, tool_calls) -> dict`
+
+Parser order:
+
+1. Already-valid OpenAI `tool_calls`
+2. Legacy `function_call`
+3. JSON object/array in content
+4. Fenced JSON
+5. XML-like tool tags
+6. Known tool name followed by balanced JSON
+7. Single-tool text forms, only if known tool names make it unambiguous
+
+Rules:
+
+- Prefer known tool names from the request over broad regex guesses.
+- If parsing is ambiguous, do not rewrite in `compat`; log in `observe`.
+- Preserve upstream `id`, `created`, `model`, `usage`, and `system_fingerprint`.
+- Set `message.content` to `null` when synthesizing tool calls.
+- Set `finish_reason` to `tool_calls`.
+- Generate stable synthetic ids like `call_gptfixes_0`.
+
+Acceptance criteria:
+
+- Unit tests cover all known formats.
+- Invalid or ambiguous content is passed through unchanged.
+- Multi-tool JSON arrays are normalized correctly.
+- Arguments are always strings containing valid JSON when returned as OpenAI
+  tool calls.
+
+## Phase 3: Non-Streaming Tool Path
+
+Complete the reliable non-streaming path for tool-using requests:
+
+- Detect `tools` in `/v1/chat/completions` requests.
+- If model/profile says `force_non_stream_tools`, send `stream=false` upstream.
+- Normalize upstream response.
+- Return a valid non-streaming OpenAI chat completion.
+
+Add request/response trace ids:
+
+- `x-gptfixes-trace-id` response header.
+- Log one compact line per request:
+  - model
+  - mode
+  - stream requested
+  - stream sent upstream
+  - tools count
+  - parser used
+  - rewrite applied true/false
+  - finish reason
+
+Acceptance criteria:
+
+- Existing mock rewrite test passes.
+- Add tests for:
+  - no tools: transparent pass-through
+  - tools + valid upstream tool calls: no rewrite needed
+  - tools + JSON content: rewrite
+  - tools + prose: pass-through in `compat`, diagnostic in `observe`
+  - upstream error: preserve status/body where appropriate
+
+## Phase 4: Streaming SSE Repair
+
+Implement a real streaming normalizer.
+
+Required behavior:
+
+- Parse SSE frames from upstream.
+- Preserve non-choice metadata where possible.
+- Strip or ignore fields known to break clients only when configured.
+- Accumulate `delta.content` when it looks like structured tool intent.
+- Once a complete tool call is parseable, emit OpenAI-compatible streaming
+  `tool_calls` deltas.
+- End with `finish_reason: "tool_calls"`.
+- Forward `[DONE]`.
+
+Pragmatic first version:
+
+- Buffer suspected tool-call content until balanced JSON/XML closes or max buffer
+  is reached.
+- If parsed, emit the full tool call in one delta.
+- If not parsed by end of stream, replay buffered content as normal content.
+
+Later version:
+
+- Emit incremental argument deltas in the same shape expected by OpenAI clients.
+
+Acceptance criteria:
+
+- Mock SSE tests prove clients receive valid event-stream output.
+- Buffered content is not lost when rewrite fails.
+- Max buffer prevents unbounded memory growth.
+- Non-tool streaming chat remains transparent.
+
+## Phase 5: Observability And Debuggability
+
+Add a trace system suitable for OSS users debugging model/harness issues.
+
+Trace files should be optional and redactable:
+
+```json
+{
+  "trace_id": "...",
+  "timestamp": "...",
+  "mode": "compat",
+  "model": "gemma4:e4b-mlx",
+  "profile": "gemma4",
+  "request": {
+    "tools": ["read_file", "write_file", "run_command"],
+    "stream": true
+  },
+  "upstream": {
+    "stream": false,
+    "finish_reason": "stop"
+  },
+  "rewrite": {
+    "applied": true,
+    "parser": "json_content",
+    "tool_calls": ["write_file"],
+    "warnings": []
+  }
+}
+```
+
+Do not log full arguments by default. Provide `--redact-args false` for local
+debugging.
+
+Acceptance criteria:
+
+- A failed run produces enough information to classify the failure without
+  leaking file contents by default.
+- README documents what each diagnostic means.
+
+## Phase 6: Tool Name Normalization
+
+Implement explicit aliasing:
+
+```json
+{
+  "tool_name_aliases": {
+    "bash": "run_command",
+    "shell": "run_command"
+  }
+}
+```
+
+Rules:
+
+- Aliasing is off unless configured by profile or user config.
+- Only map to tools actually supplied by the request.
+- Log every alias application.
+- Never map dangerous or broad names silently.
+
+Acceptance criteria:
+
+- If upstream calls `shell` and request only contains `run_command`, configured
+  alias maps it.
+- If multiple candidate tools exist, do not rewrite.
+- If target tool is not in the request, do not rewrite.
+
+## Phase 7: Experimental Agent Stabilizer
+
+This phase is optional and must remain behind `--mode stabilize`.
+
+Do not implement a hard hidden task planner first. Start with minimal,
+auditable intervention:
+
+1. Detect no-tool assistant turns in requests that include tools.
+2. Classify whether the response is final, tool-intent prose, or ordinary chat.
+3. If the response appears to be tool-intent prose, retry once with a small
+   internal steering message.
+
+Example internal retry message:
+
+```text
+The previous assistant response described an action but did not call a tool.
+Call exactly one available tool now, or provide a final answer only if the task
+is complete.
+```
+
+Rules:
+
+- Apply at most `--max-rewrite-retries`.
+- Add clear trace/log entries.
+- Never execute tools in the proxy.
+- Never claim task completion.
+- Disable this by default.
+
+Acceptance criteria:
+
+- In `compat`, no-tool prose is passed through unchanged.
+- In `observe`, no-tool prose is logged only.
+- In `stabilize`, one retry can turn tool-intent prose into a tool call.
+- If retry fails, return the original or final retry response according to a
+  documented config setting.
+
+## Phase 8: Planner Queue Experiment
+
+Only consider this after Phases 1-7 are solid.
+
+The planner queue must be opt-in and clearly labeled experimental:
+
+```bash
+gptfixes --mode stabilize --planner soft
+```
+
+Avoid a rigid "decompose once and blindly execute" design. Use a soft agenda:
+
+- Generate or infer a small list of candidate milestones.
+- Store it as trace metadata, not as a hidden contract.
+- Use it only to detect obvious premature final answers.
+- Do not inject every step into every request.
+- Do not override the harness planner.
+
+Planner states:
+
+- `disabled`
+- `observe`
+- `soft`
+
+Do not implement `hard` until there is strong evidence that users want a proxy
+to own workflow semantics.
+
+Acceptance criteria:
+
+- Planner disabled by default.
+- Planner observe mode changes no model inputs.
+- Soft planner interventions are visible in traces.
+- Users can reproduce a run with planner off.
+
+## Phase 9: Test Harness
+
+Build deterministic tests around mock upstreams:
+
+- `tests/test_rewriters_json.py`
+- `tests/test_rewriters_xml.py`
+- `tests/test_rewriters_function_call.py`
+- `tests/test_server_nonstream.py`
+- `tests/test_server_streaming.py`
+- `tests/test_profiles.py`
+- `tests/test_observe_mode.py`
+- `tests/test_stabilize_mode.py`
+
+Also keep manual/live tests:
+
+- `python3 -m proxy.test_rewrite_mock`
+- `python3 -m proxy.test_with_clean_task`
+- `python3 -m proxy.test_task02_via_proxy`
+
+Add a small "golden failure corpus" under `tests/fixtures/`:
+
+- `gemma_json_in_content.json`
+- `gemma_xml_tool_code.json`
+- `qwen_valid_tool_calls.json`
+- `gpt_oss_wrong_tool_name.json`
+- `stream_json_content.sse`
+- `stream_valid_tool_calls.sse`
+- `prose_no_tool_incomplete.json`
+
+Acceptance criteria:
+
+- `pytest -q` passes without Ollama installed.
+- Live tests are skipped unless `RUN_LIVE_OLLAMA=1`.
+- CI can run unit tests on Linux/macOS.
+
+## Phase 10: Documentation For OSS Release
+
+README structure:
+
+1. What gptfixes is
+2. What it is not
+3. Quick start with Ollama
+4. OpenCode example
+5. Aider/Continue/generic OpenAI client example
+6. Supported failure modes
+7. Modes: compat, observe, stabilize
+8. Model profiles
+9. Debug traces
+10. Safety and privacy
+11. Known limitations
+12. Contributing parser fixtures
+
+Be explicit:
+
+- The proxy improves protocol compatibility.
+- It cannot make a weak model reason like a frontier model.
+- It does not execute tools.
+- Experimental stabilization can help with no-tool drift but may change model
+  behavior.
+
+## Release Milestones
+
+### v0.1.0 - Compatibility MVP
+
+- Installable CLI.
+- Health and models endpoints.
+- Non-streaming tool-call rewrite.
+- JSON/XML/content/function_call parser coverage.
+- Mock upstream tests.
+- Basic README.
+
+### v0.2.0 - Streaming MVP
+
+- SSE parser and buffered streaming rewrite.
+- Streaming fixture tests.
+- Trace ids and trace files.
+
+### v0.3.0 - Profiles And Diagnostics
+
+- Model profiles.
+- Observe mode.
+- Tool-name aliasing with explicit config.
+- Failure classification docs.
+
+### v0.4.0 - Experimental Stabilizer
+
+- Stabilize mode.
+- No-tool retry guard.
+- Optional soft planner observe mode.
+
+## Implementation Priorities
+
+Do first:
+
+1. Package/CLI cleanup.
+2. Pure rewriter unit tests.
+3. Non-streaming compatibility path.
+4. Structured logs and trace ids.
+
+Do second:
+
+1. Streaming reconstruction.
+2. Model profiles.
+3. Tool-name aliases.
+4. OSS docs and examples.
+
+Do later:
+
+1. Stabilize mode.
+2. Soft planner experiments.
+3. Harness-specific recipes.
+
+Avoid until there is real user demand:
+
+1. Proxy-owned task execution.
+2. Proxy-owned git/test checkpoints.
+3. Hard planner queues.
+4. Hidden prompt rewriting in default mode.
+
+## Definition Of Done For The First Public Release
+
+- A user can run Ollama locally.
+- A user can start `gptfixes`.
+- A normal OpenAI-compatible client can point at `http://localhost:9000/v1`.
+- A local model that emits JSON/XML/legacy function calls can be normalized into
+  valid OpenAI `tool_calls`.
+- The proxy has deterministic tests proving the transformations.
+- Failures are observable and classifiable.
+- Default behavior is transparent except for documented compatibility repair.
+
