@@ -46,6 +46,11 @@ try:
         classify_from_openai_response,
         get_collapse_signals,
     )
+    from .stabilizer import (
+        should_attempt_stabilize,
+        build_retry_payload,
+        should_use_retry_response,
+    )
 except ImportError:
     # Allow running as python -m proxy.server from repo root
     from rewriters import (
@@ -59,6 +64,11 @@ except ImportError:
         classify_from_openai_response,
         get_collapse_signals,
     )
+    from stabilizer import (
+        should_attempt_stabilize,
+        build_retry_payload,
+        should_use_retry_response,
+    )
 
 logging.basicConfig(
     level=logging.INFO,
@@ -71,6 +81,7 @@ logger = logging.getLogger("local-tool-proxy")
 OLLAMA_BASE: str = "http://localhost:11434/v1"
 COMPAT_MODELS: Set[str] = set()
 MODE: str = "compat"  # compat | observe | stabilize  (per nextgrok.prompt)
+STABILIZE_MAX_RETRIES: int = 1
 CLIENT = httpx.AsyncClient(timeout=600.0)  # long timeout for generation
 
 # Simple in-memory per-trace state for drift scoring (Phase 1 Observe)
@@ -91,6 +102,8 @@ async def lifespan(app: FastAPI):
     logger.info(f"  upstream: {OLLAMA_BASE}")
     logger.info(f"  compat models: {sorted(COMPAT_MODELS) or '(none)'}")
     logger.info(f"  mode: {MODE}")
+    if MODE == "stabilize":
+        logger.info(f"  stabilize_max_retries: {STABILIZE_MAX_RETRIES}")
     logger.info("  Goal: Make stock OpenCode (and similar harnesses) work with small local models")
     logger.info("  via clean in-line translation of tool calling output.")
     yield
@@ -224,6 +237,7 @@ async def health():
         "compat_models": sorted(COMPAT_MODELS),
         "mode": MODE,
         "active_traces": len(TRACE_DRIFT),
+        "stabilize_max_retries": STABILIZE_MAX_RETRIES if MODE == "stabilize" else 0,
     }
 
 
@@ -473,6 +487,55 @@ async def _handle_tool_request_for_compat_model(
     except Exception as e:
         logger.debug(f"Collapse/drift classification failed: {e}")
 
+    # === Phase 2: Stabilize v1 - single retry with internal steering ===
+    if STABILIZE_MAX_RETRIES > 0 and should_attempt_stabilize(category, MODE, had_tools=True):
+        for attempt in range(1, STABILIZE_MAX_RETRIES + 1):
+            logger.info(f"[{trace_id}] STABILIZE ATTEMPT {attempt}/{STABILIZE_MAX_RETRIES} "
+                        f"category={category} — performing internal retry with steering message")
+
+            try:
+                orig_payload = json.loads(original_body)
+                retry_payload = build_retry_payload(orig_payload)
+
+                # Call upstream again (we are already forcing non-stream in this path)
+                retry_upstream = await CLIENT.post(url, json=retry_payload, headers=headers)
+                retry_data = retry_upstream.json() if retry_upstream.status_code == 200 else {}
+
+                # Classify the retry response
+                retry_category = classify_from_openai_response(retry_data, had_tools_in_request=True)
+                retry_signals = get_collapse_signals(retry_category, had_tools_in_request=True)
+
+                logger.info(f"[{trace_id}] stabilize_retry_result: category={retry_category} signals={retry_signals}")
+
+                use_retry, reason = should_use_retry_response(data, retry_data)
+
+                if use_retry:
+                    logger.info(f"[{trace_id}] ✓ STABILIZE SUCCESS — using retry response (reason={reason})")
+                    # Update drift as if this was a successful tool turn
+                    state = TRACE_DRIFT[trace_id]
+                    state["tool_streak"] += 1
+                    state["turns_since_last_tool"] = 0
+                    state["total_tool_turns"] += 1
+                    if MODE in ("observe", "stabilize"):
+                        logger.info(f"[{trace_id}] drift: {state} (after successful stabilize retry)")
+
+                    # Best-effort cleanup
+                    for obj in (upstream, locals().get('retry_upstream')):
+                        if obj is not None:
+                            try:
+                                await obj.aclose()
+                            except Exception:
+                                pass
+                    resp = JSONResponse(content=retry_data)
+                    resp.headers["x-gptfixes-trace-id"] = trace_id
+                    return resp
+                else:
+                    logger.info(f"[{trace_id}] stabilize retry did not produce tool_calls (reason={reason}) — will fallback")
+
+            except Exception as e:
+                logger.warning(f"[{trace_id}] stabilize retry attempt {attempt} failed: {e}")
+
+    # Normal return of original (no stabilization or stabilization did not help)
     content = upstream.content
     await upstream.aclose()
     resp = Response(content=content, status_code=upstream.status_code)
@@ -494,12 +557,15 @@ def main():
                         help="Comma-separated list of model substrings that get special small-model handling")
     parser.add_argument("--mode", default="compat", choices=["compat", "observe", "stabilize"],
                         help="NextGrok mode: compat (default, format repair only), observe (diagnostics + drift), stabilize (experimental interventions)")
+    parser.add_argument("--stabilize-max-retries", type=int, default=1,
+                        help="Max automatic upstream retries when in stabilize mode (default 1, conservative)")
     args = parser.parse_args()
 
-    global OLLAMA_BASE, COMPAT_MODELS, MODE
+    global OLLAMA_BASE, COMPAT_MODELS, MODE, STABILIZE_MAX_RETRIES
     OLLAMA_BASE = args.ollama_base
     COMPAT_MODELS = {m.strip().lower() for m in args.compat_models.split(",") if m.strip()}
     MODE = args.mode
+    STABILIZE_MAX_RETRIES = max(0, args.stabilize_max_retries)
 
     import uvicorn
     logger.info(f"Starting local-tool-proxy on {args.host}:{args.port}  mode={MODE}")
