@@ -77,6 +77,51 @@ Then run OpenCode with `-m local-proxy/gemma4:e4b-mlx` (or equivalent) and give 
 - OpenCode PR #16531 (unmerged as of May 2026): The `toolParser` compat layer inside OpenCode. This proxy can be seen as an external version of the same idea that works for *any* harness.
 - SmallHarness: Excellent client-side JSON/XML fallback parsers. We are stealing the best detection heuristics and moving them server-side into the proxy.
 
+## NextGrok Modes (Stabilize + Planner)
+
+As of the NextGrok work, the proxy supports three explicit modes via `--mode`:
+
+- `compat` (default): Pure wire-format repair only. No behavior change. Recommended for normal use.
+- `observe`: Same as compat + rich diagnostics for "Agent Loop Collapse" (when the model stops using tools and falls back to literal text/prose). Adds per-trace drift scoring.
+- `stabilize` (experimental): Actively tries to keep the model in the tool-using loop when it starts to drift. Uses conservative internal retries with a small steering message when the classifier detects `tool_intent_prose` or `literal_commands`.
+
+Additionally, when using `--mode stabilize`, you can enable a lightweight planner:
+
+```bash
+python3 -m proxy.server \
+  --mode stabilize \
+  --planner soft \
+  --stabilize-max-retries 1 \
+  --compat-models gemma4:e4b-mlx
+```
+
+- `--planner disabled` (default): Planner does nothing.
+- `--planner observe`: Planner builds an agenda from the request but only logs it (no behavior change).
+- `--planner soft`: On stabilize retries, the steering message may include a short high-level hint derived from the agenda (still never rewrites the user's original task).
+
+**Important safety & usage notes:**
+- `stabilize` and `planner` are **explicitly opt-in** behind CLI flags. They are off by default.
+- They only affect requests for models listed in `--compat-models`.
+- Every intervention is logged with the `x-gptfixes-trace-id` and clearly marked (e.g. `STABILIZE ATTEMPT`, `planner_soft_hint_used`).
+- You can always reproduce any run with stabilization completely disabled by using `--mode compat`.
+- These features change model behavior (they add internal steering messages on retries). Treat them as experimental middleware.
+
+Example full command for experimentation on the tasklite prompt:
+
+```bash
+python3 -m proxy.server \
+  --port 9000 \
+  --ollama-base http://localhost:11434/v1 \
+  --compat-models gemma4:e4b-mlx \
+  --mode stabilize \
+  --planner soft \
+  --stabilize-max-retries 1
+```
+
+Then point stock OpenCode at `http://localhost:9000/v1` using the `small-local` provider (see `examples/opencode-for-proxy.json`).
+
+See `nextgrok.prompt` in the repo root for the full design rationale and constraints.
+
 ## Next Steps (for this repo)
 
 See the todo list in the parent conversation and the code comments in `server.py`.

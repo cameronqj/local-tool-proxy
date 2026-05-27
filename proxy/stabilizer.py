@@ -3,11 +3,16 @@ proxy/stabilizer.py
 
 Minimal active stabilization logic for NextGrok (Phase 2).
 
-Conservative, opt-in via --mode stabilize.
-Only triggers on clear collapse categories from the classifier.
-Implements a single-retry with a small internal steering message.
+**Safety / Contract (critical):**
+- Only active when `--mode stabilize` is explicitly passed.
+- Only triggers on `tool_intent_prose` and `literal_commands` (conservative).
+- At most one retry per turn by default (`--stabilize-max-retries`).
+- The steering message is added as an *internal* message only.
+- The original user task/messages are **never** modified.
+- Every intervention is logged with the trace id.
+- If the retry does not help, we always fall back to the original response.
 
-All behavior is heavily logged and traceable. The original user task is never rewritten.
+This is experimental middleware. It changes model behavior on retries.
 """
 
 from __future__ import annotations

@@ -3,16 +3,19 @@ proxy/planner.py
 
 Lightweight "Soft Planner" for NextGrok (Phase 3).
 
+**Safety / Contract (critical):**
+- Only has any effect when `--mode stabilize --planner soft` is used.
+- Agenda and hints are **never** injected into the original user messages.
+- Only used to slightly enrich the internal steering message on stabilize retries.
+- Fully disabled by default (`--planner disabled`).
+- Must be possible to exactly replay any run with `--mode compat`.
+
 Per the spec:
 - Never becomes the primary task decomposer (the harness owns the plan).
 - Output lives in trace metadata / is used only for recovery guidance.
 - Only influences behavior inside stabilize-mode recovery paths.
-- Must be possible to run the exact same prompt with planner completely disabled.
 
-Phase 3 v1 scope: very conservative.
-- Basic agenda extraction (heuristic from first user message + known tools).
-- Can contribute a small "known state" hint to stabilization steering messages when planner=soft.
-- Full observability in traces.
+Phase 3 v1 scope: very conservative (heuristic extraction only).
 """
 
 from __future__ import annotations

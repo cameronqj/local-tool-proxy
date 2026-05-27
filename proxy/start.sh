@@ -19,6 +19,9 @@ echo "   Port:        $PORT"
 echo "   Compat:      $MODELS"
 echo "   Upstream:    $OLLAMA_BASE"
 echo ""
+echo "   NextGrok modes (experimental, opt-in):"
+echo "     --mode stabilize --planner soft --stabilize-max-retries 1"
+echo ""
 echo "   After it starts, test with:"
 echo "     curl http://localhost:$PORT/health"
 echo "     curl http://localhost:$PORT/v1/models"
@@ -30,4 +33,5 @@ echo ""
 exec python3 -m proxy.server \
   --port "$PORT" \
   --ollama-base "$OLLAMA_BASE" \
-  --compat-models "$MODELS"
+  --compat-models "$MODELS" \
+  "$@"

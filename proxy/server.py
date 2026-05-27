@@ -116,6 +116,8 @@ async def lifespan(app: FastAPI):
     if MODE == "stabilize":
         logger.info(f"  stabilize_max_retries: {STABILIZE_MAX_RETRIES}")
         logger.info(f"  planner: {PLANNER_MODE}")
+        logger.warning("  *** stabilize mode is EXPERIMENTAL and will add internal steering messages on retries ***")
+        logger.warning("  *** To disable all NextGrok behavior: use --mode compat ***")
     logger.info("  Goal: Make stock OpenCode (and similar harnesses) work with small local models")
     logger.info("  via clean in-line translation of tool calling output.")
     yield
@@ -596,11 +598,11 @@ def main():
     parser.add_argument("--compat-models", default="gemma4:e4b-mlx,gemma4:e2b-mlx,gpt-oss:20b",
                         help="Comma-separated list of model substrings that get special small-model handling")
     parser.add_argument("--mode", default="compat", choices=["compat", "observe", "stabilize"],
-                        help="NextGrok mode: compat (default, format repair only), observe (diagnostics + drift), stabilize (experimental interventions)")
+                        help="NextGrok mode (stabilize and planner are experimental and off by default)")
     parser.add_argument("--stabilize-max-retries", type=int, default=1,
-                        help="Max automatic upstream retries when in stabilize mode (default 1, conservative)")
+                        help="Max automatic upstream retries in stabilize mode (conservative, default 1)")
     parser.add_argument("--planner", default="disabled", choices=["disabled", "observe", "soft"],
-                        help="Soft planner mode (only effective with --mode stabilize): disabled | observe | soft")
+                        help="Planner (only active with --mode stabilize): disabled | observe | soft")
     args = parser.parse_args()
 
     global OLLAMA_BASE, COMPAT_MODELS, MODE, STABILIZE_MAX_RETRIES, PLANNER_MODE
