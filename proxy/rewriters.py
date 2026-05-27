@@ -50,7 +50,8 @@ def looks_like_tool_call_json(text: str) -> bool:
         r'<tool_use>.*?</tool_use>',                       # some models use tags
         r'```(?:json)?\s*\{.*?"name".*?\}\s*```',          # fenced JSON block
         r'<tool_code>.*?</tool_code>',                     # common small model XML style
-        r'<execute_tool>.*?</execute_tool>',               # another common variant
+        r'<execute_tool\b',                                # <execute_tool ...> (loose match)
+        r'\*\*Tool Call:\*\*',                             # **Tool Call:** markdown style
         r'\b\w+\s*\{',                                     # toolName{...}  (ToolBridge-style JSON fallback)
         r'\b\w+\s*\(\s*\{',                                # toolName({...})
     ]
@@ -142,7 +143,7 @@ def repair_jsonish(text: str, repairs: list[str] | None = None) -> str:
         cleaned = re.sub(r'^```(?:json)?\s*|\s*```$', '', cleaned, flags=re.IGNORECASE | re.DOTALL).strip()
 
     if "single_quotes" in repairs:
-        cleaned = cleaned.replace("'", '"')
+        cleaned = re.sub(r"'", '"', cleaned)
     if "unquoted_keys" in repairs:
         cleaned = re.sub(r'(\w+)\s*:', r'"\1":', cleaned)
     if "trailing_commas" in repairs:
@@ -223,7 +224,12 @@ def parse_tool_call_from_content(
     known_tool_names: list[str] | None = None,
 ) -> list[dict] | None:
     """
-    Best-effort extraction using a clear strategy list (Phase 2 architecture).
+    Best-effort extraction using a clear strategy list (Phase 2 architecture per gptfixes.prompt).
+
+    Strategy order:
+    1. JSON content (including name{json} fallback when known names are provided)
+    2. XML-like content
+    (Additional strategies like legacy function_call can be added here)
     """
     if not content:
         return None
@@ -232,128 +238,19 @@ def parse_tool_call_from_content(
     if not looks_like_tool_call_json(text):
         return None
 
-    strategies = [
-        lambda t: parse_json_content(t, known_tool_names),
-        lambda t: parse_xml_content(t, known_tool_names),
-        # Legacy raw function_call and single tool text can be added here
-    ]
-
-    for strategy in strategies:
-        try:
-            calls = strategy(text)
-            if calls:
-                return calls
-        except Exception:
-            continue
-
-    return None
-
-
-def parse_tool_call_from_content(
-    content: str,
-    known_tool_names: Optional[List[str]] = None,
-) -> Optional[List[Dict[str, Any]]]:
-    """
-    Best-effort extraction of tool call(s) from a content string.
-    Tries multiple strategies because small models are very creative with formats.
-    `known_tool_names` (from the original tools[] in the request) greatly helps
-    disambiguation — taken from ToolBridge's approach.
-    """
-    if not content:
-        return None
-
-    text = content.strip()
-    if not looks_like_tool_call_json(text):
-        return None
-
-    calls: List[Dict[str, Any]] = []
     known = known_tool_names or []
 
-    # Strategy 1: XML-style formats (very common with small models)
-    xml_call = _parse_xml_tool_call(text)
-    if xml_call:
-        calls.append(xml_call)
-        return calls
+    # Strategy 1: JSON content (most common)
+    json_calls = parse_json_content(text, known)
+    if json_calls:
+        return json_calls
 
-    # Strategy 1b: ToolBridge-inspired JSON fallback for name{...} / name({...}) patterns
-    if known:
-        json_fb = _parse_json_tool_call_fallback(text, known)
-        if json_fb:
-            calls.append(json_fb)
-            return calls
+    # Strategy 2: XML-like content
+    xml_calls = parse_xml_content(text, known)
+    if xml_calls:
+        return xml_calls
 
-    # Strategy 2: Fenced JSON or raw JSON object/array
-    fenced = re.search(r'```(?:json)?\s*(.+?)\s*```', text, re.DOTALL | re.IGNORECASE)
-    candidate = fenced.group(1).strip() if fenced else text
-
-    try:
-        data = json.loads(candidate)
-        if isinstance(data, list):
-            items = data
-        elif isinstance(data, dict):
-            if "tool_calls" in data or "tool_call" in data:
-                items = data.get("tool_calls") or data.get("tool_call") or []
-            else:
-                items = [data]
-        else:
-            items = []
-
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            name = item.get("name") or item.get("tool") or item.get("function", {}).get("name")
-            args = item.get("arguments") or item.get("parameters") or item.get("args") or item.get("input") or {}
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except Exception:
-                    pass
-            if name:
-                calls.append({
-                    "id": f"call_{len(calls)}_{name[:8]}",
-                    "type": "function",
-                    "function": {
-                        "name": name,
-                        "arguments": json.dumps(args) if isinstance(args, (dict, list)) else str(args),
-                    }
-                })
-        if calls:
-            return calls
-    except Exception:
-        pass
-
-    # Strategy 3: Last resort - regex for {"name": "...", "arguments": ...}
-    match = re.search(r'\{\s*"name"\s*:\s*"([^"]+)"\s*,\s*"arguments"\s*:\s*(\{.*?\})\s*\}', text, re.DOTALL)
-    if match:
-        name = match.group(1)
-        try:
-            args = json.loads(match.group(2))
-        except Exception:
-            args = {"raw": match.group(2)}
-        calls.append({
-            "id": f"call_{len(calls)}_{name[:8]}",
-            "type": "function",
-            "function": {"name": name, "arguments": json.dumps(args)},
-        })
-        return calls
-
-    # Strategy 4: Very last resort - bare "toolName{json}" even without known names list
-    # (helps when the caller didn't forward tool names)
-    bare = re.search(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\s*(\{.*\})', text, re.DOTALL)
-    if bare:
-        name = bare.group(1)
-        try:
-            args = json.loads(bare.group(2))
-            calls.append({
-                "id": f"call_{name[:8]}",
-                "type": "function",
-                "function": {"name": name, "arguments": json.dumps(args)},
-            })
-            return calls
-        except Exception:
-            pass
-
-    return None if not calls else calls
+    return None
 
 
 def synthesize_tool_call_response(
