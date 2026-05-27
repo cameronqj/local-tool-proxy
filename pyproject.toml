@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gptfixes"
+version = "0.1.0"
+description = "OpenAI-compatible tool-call repair proxy for Ollama and other local models"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+  {name = "Cameron Jones"}
+]
+dependencies = [
+    "fastapi>=0.100.0",
+    "httpx>=0.24.0",
+    "uvicorn[standard]>=0.23.0",
+    "pydantic>=2.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+gptfixes = "proxy.server:main"
+
+[project.urls]
+Homepage = "https://github.com/yourname/gptfixes"
+Repository = "https://github.com/yourname/gptfixes"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["proxy*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.json", "*.md"]
