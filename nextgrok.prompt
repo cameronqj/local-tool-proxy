@@ -1,0 +1,316 @@
+# nextgrok.prompt
+
+**Working title:** NextGrok  
+**Focus:** Moving beyond pure wire-format repair into explicit stabilization and lightweight planning for small local models in real agent harnesses.
+
+## Executive Summary
+
+We have built a working `compat` baseline for gptfixes. It can translate common
+creative tool-calling output from small models (especially Gemma 4 E4B/E2B) into
+the OpenAI `tool_calls` format that stock harnesses like OpenCode expect.
+
+This layer is promising but not finished. Before treating it as shipped, we still
+need to harden parser coverage, fix known regression cases, and add deterministic
+tests around wrapped `tool_calls`, `input` arguments, XML command mapping, and
+streaming behavior.
+
+Real end-to-end testing with unmodified `opencode` against the live proxy has now revealed the next dominant failure mode:
+
+**Agent Loop Collapse.**  
+Even when the wire format is correct (or would be after repair), the model frequently stops emitting tool calls after 1–2 turns and falls back to printing literal commands, numbered steps, or explanatory prose. This happens on both pathological rigid prompts *and* on clean, realistic tasks (e.g. the bugfix + test task).
+
+Heavy prompt surgery (aggressively rewriting the user's original task with
+extra instructions, few-shots, or constraints) is explicitly deprioritized as
+the primary remediation. The higher-leverage path is to build **explicit,
+auditable stabilization** around tool-use drift.
+
+Stabilization may still use minimal hidden steering on retry turns. That must be
+named honestly and treated as behavior-changing middleware: default off,
+trace-visible, retry-only, and never a mutation of the original user task.
+
+This document defines the next major phase of work: **NextGrok** — an evolution of gptfixes that adds two new opt-in subsystems while preserving the narrow, transparent `compat` core.
+
+## Diagnosis from Real Harness Runs (May 2026)
+
+### Evidence
+- Rigid 8-rule Tic-Tac-Toe prompt (via real `opencode -m small-local/gemma4:e4b-mlx`):
+  - 1 COMPAT tool turn.
+  - "No rewrite needed" (model did not emit JSON-in-content).
+  - Model produced almost no visible output beyond the banner.
+  - Process exited in ~74s with zero artifacts.
+
+- Realistic clean bugfix task (`tasks/task-02-bugfix.md`, same harness + proxy):
+  - 2 COMPAT tool turns.
+  - Both returned "No rewrite needed".
+  - Same minimal output and early exit (~49s).
+  - Zero files written, zero tests run.
+
+### Two Distinct Failure Classes
+
+| Class | Symptom | Current gptfixes (compat) | Real opencode runs |
+|-------|---------|---------------------------|--------------------|
+| Format failure | Tool intent in `content` (JSON, XML, `run_command(...)`, etc.) | Well handled | Not the dominant issue in these runs |
+| **Agent Loop Collapse** | Model stops emitting tool calls and drifts into literal text / prose | Almost no leverage today | Dominant failure on both prompts |
+
+The format problem was the right first target. We are now data-driven on the second problem.
+
+## Design Philosophy
+
+1. **Stabilization over Surgery**  
+   We will not make the user's task prompt the primary battleground. The proxy should help the model *stay in the tool-using contract* it was given by the harness, rather than constantly re-educating the model about what the user originally asked.
+
+2. **Explicit and Auditable**  
+   All stabilization and planning behavior must be:
+   - Behind clear `--mode` / flags (never on by default in `compat`).
+   - Heavily traced and logged with `x-gptfixes-trace-id`.
+   - Reversible (user can replay the exact same run with the feature off).
+
+3. **Harness-Respecting**  
+   We do not own the task, the plan, or the execution semantics. We are a helpful intermediary that notices when the model is slipping out of the tool-calling game the harness expects, and offers minimal, logged assistance to get it back in.
+
+4. **Small Model Reality**  
+   We accept that 4B–8B class models on 24 GB fanless hardware have real limits. The goal is to raise the floor and extend the length of reliable tool-using sessions, not to make them indistinguishable from frontier models.
+
+## Core Proposal: Stabilizer + Planner
+
+We evolve the three-mode model from the original `gptfixes.prompt`:
+
+- `compat` — unchanged, narrow wire-format repair baseline.
+- `observe` — adds rich diagnostics for collapse patterns (next priority).
+- `stabilize` — active but conservative interventions (the main new work).
+
+Planner support is not a fourth mode. It is a separate, more experimental flag
+that can be enabled only alongside `observe` or `stabilize`:
+
+- `--planner disabled|observe|soft`
+
+### Stabilize Mode (Primary Focus)
+
+**Goal:** Detect when the model is drifting out of tool use and apply minimal, targeted, logged interventions to keep the loop alive.
+
+**Detection signals (in priority order):**
+- Assistant response to a `tools`-present request contains no `tool_calls` and `finish_reason != "tool_calls"`.
+- Content contains high-confidence "literal command" patterns (e.g. starts with `git `, `mkdir `, `python -m pytest`, numbered steps that look like shell actions).
+- Sudden drop in tool-call rate within a trace (e.g. first 3 turns used tools, next 2 did not).
+- Repeated similar non-tool responses (loop detection).
+- Explicit "I will now..." or "Next I need to..." prose when tools are available.
+
+**Intervention strategies (conservative first):**
+1. **Passive (observe mode):** Rich classification + trace annotation only.
+2. **Light retry (stabilize):** On detecting tool-intent prose, automatically
+   retry the upstream model call once with a single, small, internal steering
+   message appended to the upstream-only message list. The original user task
+   must not be rewritten. The failed assistant response is not forwarded to the
+   harness if the retry succeeds. Example:
+   > "The previous response described an action but did not use a tool. Use one of the available tools now, or give a final answer only if the task is genuinely complete."
+3. **Stateful guidance (later):** Maintain a small per-trace "drift counter" and gradually increase steering strength (still within one retry per turn).
+
+Synthetic tool-call creation is explicitly excluded from Stabilize v1. If it is
+ever explored, it belongs in a later `dangerous_experiments` area because it
+forges assistant intent rather than merely retrying the model.
+
+**Hard rules for Stabilize:**
+- At most one automatic retry per model turn by default.
+- Never execute tools.
+- Never claim task completion on behalf of the model.
+- Every intervention is visible in the trace file.
+- User can disable per-model or per-request.
+- Preserve the harness contract: the harness receives either the original
+  upstream response or the successful retry response, never an invented tool call
+  unless a future dangerous experiment is explicitly enabled.
+
+### Retry Contract
+
+Stabilize mode must define the upstream retry precisely:
+
+- The proxy may make an extra upstream `/chat/completions` request.
+- The retry request is built from the original request body plus one extra
+  internal steering message.
+- The original user message is not modified.
+- The steering message should use the highest-priority role the upstream accepts
+  without breaking compatibility. Prefer `system` for standard chat completions;
+  make this configurable if a provider rejects it.
+- The failed assistant response that triggered the retry is recorded in the
+  trace, but not inserted into the retry transcript unless a future experiment
+  shows that doing so helps.
+- If the retry produces valid `tool_calls`, return the retry response to the
+  harness.
+- If the retry fails to produce valid `tool_calls`, return the original response
+  by default and record the failed retry in the trace.
+- Add a config option later only if needed:
+  `--stabilize-return-on-failed-retry original|retry`.
+
+The internal steering message is hidden from the harness transcript but visible
+in redacted traces. This is behavior-changing middleware and must remain off in
+`compat`.
+
+### Session And State Contract
+
+OpenAI-compatible requests are stateless unless the proxy defines a correlation
+strategy. Any cross-turn drift detection must be best-effort and bounded.
+
+State correlation order:
+
+1. Explicit client header, if supplied:
+   - `x-gptfixes-session-id`
+   - `x-request-id` as a fallback only if stable
+2. Hash of stable conversation features:
+   - model
+   - first user message hash
+   - recent message ids/content hashes
+   - tool-name set
+3. Single-request fallback:
+   - no cross-turn state; classify only the current response
+
+State limits:
+
+- TTL default: 30 minutes since last request.
+- Max sessions in memory: configurable.
+- Max trace bytes per session: configurable.
+- No raw tool arguments in state by default; store hashes/classifications unless
+  trace redaction is disabled.
+
+When correlation is uncertain, do not apply stronger stateful interventions.
+Log `state_correlation=weak` and restrict behavior to single-turn classification
+or one-turn retry.
+
+### Planner Component (Secondary, More Experimental)
+
+**Goal:** Provide a lightweight, opt-in "agenda" and recovery mechanism when pure per-turn stabilization is insufficient.
+
+**Design constraints (non-negotiable):**
+- The planner must **not** become the primary task decomposer. The harness (opencode) owns the plan.
+- Planner output is metadata / guidance, not hidden instructions injected into every user message.
+- Must be possible to run the exact same user prompt with planner completely disabled and get reproducible behavior.
+
+**Proposed "Soft Planner" design:**
+- On trace start (or on explicit escalation from Stabilize), the planner may generate a short, high-level milestone list (3–7 items) derived from the original user request + observed tool activity so far.
+- This agenda lives in trace metadata only.
+- It is used for:
+  - Detecting premature "task complete" claims by the model.
+  - Suggesting a recovery turn when the model has clearly lost the thread (e.g. 4+ consecutive non-tool turns on a task that clearly requires more work).
+  - Optional: exposing a very small number of high-signal facts to the model on recovery retries (e.g. "Current known state: 2 files edited, tests not yet passing").
+- The planner can be backed by the same small model or (preferred for quality) a stronger local model if the user configures one.
+
+**Planner flag states:**
+- `disabled` (default)
+- `observe` (builds agenda, logs recommendations, changes nothing)
+- `soft` (may trigger recovery retries using the agenda)
+
+There is no `hard` planner state in the implementation plan. Hard planning would
+mean workflow ownership and should not be implemented without strong evidence of
+user demand and a separate design review.
+
+## Phased Implementation Plan
+
+### Phase 0: Instrumentation & Collapse Taxonomy (Foundation)
+- Extend existing trace schema with new fields:
+  - `collapse_signals[]`
+  - `tool_use_streak`
+  - `last_tool_turn`
+  - `stabilizer_interventions[]`
+- Build a small classifier in `proxy/collapse.py` (pure) that can label an assistant response as one of: `tool_calls`, `final_answer`, `tool_intent_prose`, `literal_commands`, `chat`, `unclear`.
+- Add `--collapse-report` CLI that summarizes a trace directory.
+- **Deliverable:** We can automatically classify the exact failure modes we saw in the May 2026 real opencode runs.
+
+### Phase 1: Observe Mode for Collapse
+- Implement full `observe` mode (previously sketched but under-implemented).
+- Every no-tool turn on a tools-present request is classified and logged with the taxonomy from Phase 0.
+- Add live "drift score" to `/health` and per-request logs when in observe/stabilize.
+- If no reliable session correlation exists, drift score is request-local only.
+- **Evaluation:** Run the two real prompts (rigid + tasklite) through `opencode` with `--mode observe` and produce a public analysis report.
+
+### Phase 2: Stabilize v1 (Minimal Active Intervention)
+- Implement the single-retry steering mechanism described above.
+- Conservative defaults: only triggers on clear "tool_intent_prose" + "literal_commands" categories.
+- Full tracing of every intervention (what was sent, what came back, whether it produced a tool call).
+- Add `--stabilize-max-retries` (default 1).
+- **Evaluation gate:** On the realistic tasklite prompt, measure:
+  - no-tool collapse rate
+  - retry-to-tool-call conversion rate
+  - valid-schema tool-call rate after retry
+  - average tool turns before collapse
+  - task completion rate vs. `compat` baseline
+  Minimum 3 runs each before drawing conclusions.
+
+### Phase 3: Soft Planner + Recovery
+- Implement the soft planner as defined above (agenda generation + limited use in recovery).
+- Add `--planner soft|observe|disabled`.
+- Planner may only influence behavior inside stabilize-mode recovery paths.
+- **Evaluation gate:** Demonstrate recovery from at least one documented collapse pattern that pure per-turn stabilize could not handle.
+
+### Phase 4: Polish, Safety, and OSS Readiness
+- Rich documentation and examples for stabilize + planner.
+- Safety review of all intervention messages.
+- Performance / cost accounting (extra turns are visible and countable).
+- "Replay with stabilization off" guarantee is tested and documented.
+- Decision point on whether to promote stabilize out of experimental.
+
+## Non-Goals (Important)
+
+- Do not make heavy, automatic rewriting of the user's original task prompt the main strategy.
+- Do not turn NextGrok into a hidden task planner or autonomous agent that owns execution.
+- Do not silently change the semantics of the conversation the harness thinks it is having.
+- Do not require users to adopt special prompt styles to "make stabilization work."
+- Do not implement a "hard" planner in this phase.
+- Do not synthesize tool calls from prose in stabilize v1.
+- Stabilize/planner features must not regress the quality or transparency of the `compat` path.
+
+## Success Criteria (Measurable)
+
+For the realistic class of tasks (exemplified by task-02 bugfix):
+
+- With `--mode stabilize` (and planner `soft` or `disabled`), stock `opencode` + gemma4:e4b-mlx should be able to complete the end-to-end task (create buggy.py, write passing tests, run pytest successfully) in a majority of attempts.
+- Before that end-to-end target is considered meaningful, stabilize must show
+  measurable improvement on narrower metrics: fewer no-tool collapses, more
+  valid tool calls after retry, and longer sustained tool-use streaks.
+- Trace files must make it obvious what interventions occurred and why.
+- A user can reproduce the exact same run with stabilization disabled and see the difference.
+
+For the rigid stress-test class:
+- Improvement is desirable but secondary. We do not optimize the system primarily for 8-rule theatrical prompts.
+
+## Risks and Open Questions
+
+1. **Steering message quality** — How sensitive are small models to the exact wording of the internal retry messages? Will we need per-model or per-profile steering text?
+
+2. **Over-stabilization / sycophancy** — Repeated retries could make the model more likely to produce low-quality tool calls just to satisfy the guardrail.
+
+3. **Planner model choice** — Should the planner use the same small model, a larger local model, or be configurable? Using a stronger model for planning while keeping the worker model small is philosophically attractive but adds complexity.
+
+4. **Trace bloat and privacy** — Recovery turns and planner agendas increase the amount of data in traces. Need good redaction and size controls.
+
+5. **Harness coupling** — How much do we need to know about opencode's specific retry / error handling behavior to make recovery effective? Can we stay mostly harness-agnostic?
+
+6. **User mental model** — Will users understand the difference between "the model did this" vs. "the stabilizer caused a retry that produced this"? Education + excellent traces are critical.
+
+7. **State correlation ambiguity** — Without a stable session id, the proxy may
+   misattribute turns from different conversations. Stateful behavior must
+   degrade gracefully to single-request behavior.
+
+8. **Hidden steering compatibility** — Some harnesses or providers may treat
+   added system messages differently. The retry role and insertion point may
+   need provider/profile-specific handling.
+
+## Relationship to Existing Codebase
+
+- The current `proxy/rewriters.py`, server COMPAT path, trace_id system, and `test_rigid_prompt.py` / `test_task02_via_proxy.py` remain the foundation.
+- New code should live in:
+  - `proxy/collapse.py` (classifier)
+  - `proxy/stabilizer.py` (detection + retry logic)
+  - `proxy/planner.py` (agenda + recovery)
+  - Extensions to `server.py` for the new modes
+- All new behavior must be gated so that `--mode compat` continues to behave exactly as today.
+
+## Next Immediate Steps (if this direction is approved)
+
+1. Create this document as the north star (`nextgrok.prompt`).
+2. Implement Phase 0 instrumentation + collapse classifier (high confidence, low risk).
+3. Run a small set of real `opencode` traces in `observe` mode on both prompt families to expand the golden collapse corpus.
+4. Prototype the single-retry stabilizer on the realistic tasklite prompt and measure the delta.
+
+---
+
+This document is intentionally more ambitious than the "Phase 7/8" sketches in the original `gptfixes.prompt`, while still respecting the same core constraints around transparency, auditability, and not becoming a hidden agent runtime.
+
+The bet is that explicit, observable stabilization + lightweight planning will be more robust and honest than either (a) hoping better prompting alone solves it, or (b) pretending the format repair layer is sufficient for real agentic work with these models.

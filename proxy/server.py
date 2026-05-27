@@ -42,6 +42,10 @@ try:
         rewrite_stream_chunk,
         is_tool_call_delta,
     )
+    from .collapse import (
+        classify_from_openai_response,
+        get_collapse_signals,
+    )
 except ImportError:
     # Allow running as python -m proxy.server from repo root
     from rewriters import (
@@ -50,6 +54,10 @@ except ImportError:
         synthesize_tool_call_response,
         rewrite_stream_chunk,
         is_tool_call_delta,
+    )
+    from collapse import (
+        classify_from_openai_response,
+        get_collapse_signals,
     )
 
 logging.basicConfig(
@@ -379,6 +387,16 @@ async def _handle_tool_request_for_compat_model(
             tool_calls = parse_tool_call_from_content(content_str, known_tool_names=tool_names or None)
             if tool_calls:
                 logger.info(f"[{trace_id}] ✓ REWROTE tool call(s) for stock OpenCode: { [t['function']['name'] for t in tool_calls] }")
+
+                # Phase 0: even on rewrite success, note the category for baseline data
+                try:
+                    category = classify_from_openai_response(data, had_tools_in_request=True)
+                    if category != "tool_calls":
+                        signals = get_collapse_signals(category, had_tools_in_request=True)
+                        logger.info(f"[{trace_id}] collapse_before_rewrite: category={category} signals={signals}")
+                except Exception:
+                    pass
+
                 rewritten = synthesize_tool_call_response(content_str, tool_calls, finish or "tool_calls")
 
                 # Preserve important fields
@@ -394,6 +412,15 @@ async def _handle_tool_request_for_compat_model(
 
     # No rewrite happened — return original
     logger.info(f"[{trace_id}] No rewrite needed for {model} (rigid={is_rigid})")
+
+    # Phase 0 instrumentation: classify the response for collapse analysis
+    try:
+        category = classify_from_openai_response(data, had_tools_in_request=True)
+        signals = get_collapse_signals(category, had_tools_in_request=True)
+        logger.info(f"[{trace_id}] collapse: category={category} signals={signals}")
+    except Exception as e:
+        logger.debug(f"Collapse classification failed: {e}")
+
     content = upstream.content
     await upstream.aclose()
     resp = Response(content=content, status_code=upstream.status_code)
