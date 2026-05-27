@@ -59,15 +59,19 @@ def looks_like_tool_call_json(text: str) -> bool:
 
 
 def _parse_xml_tool_call(text: str) -> Optional[Dict[str, Any]]:
-    """Try to parse various XML-ish tool call formats that small models invent."""
+    """Try to parse various XML-ish tool call formats that small models invent.
+
+    This version is hardened for the exact creative formats observed in rigid prompt runs
+    (e.g. <tool_code>run_command("mkdir foo")</tool_code> with quoted arguments).
+    """
     patterns = [
-        # <tool_code>tool_name(args...)</tool_code>
-        r'<tool_code>\s*(\w+)\s*\((.*?)\)\s*</tool_code>',
+        # <tool_code>tool_name("args...")</tool_code> or with single quotes
+        r'<tool_code>\s*(\w+)\s*\(\s*["\']?(.*?)["\']?\s*\)\s*</tool_code>',
         # <execute_tool>tool_name(args...)</execute_tool>
         r'<execute_tool>\s*(\w+)\s*\((.*?)\)\s*</execute_tool>',
         # <tool><name>xxx</name><arguments>...</arguments></tool>
         r'<tool>\s*<name>\s*(\w+)\s*</name>\s*<arguments>\s*(.*?)\s*</arguments>\s*</tool>',
-        # <run_terminal_cmd ...> or similar loose tags we saw in rigid tests
+        # Loose tags seen in earlier rigid tests
         r'<(run_terminal_cmd|write_file|git_commit)\b[^>]*>(.*?)</\1>',
     ]
 
@@ -76,17 +80,29 @@ def _parse_xml_tool_call(text: str) -> Optional[Dict[str, Any]]:
         if match:
             name = match.group(1)
             args_str = match.group(2).strip()
-            try:
-                if args_str.startswith('{'):
-                    args = json.loads(args_str)
-                else:
-                    args = {}
-                    for pair in re.split(r',\s*', args_str):
-                        if '=' in pair:
-                            k, v = pair.split('=', 1)
-                            args[k.strip()] = v.strip().strip('"\'')
-            except Exception:
-                args = {"raw": args_str}
+
+            # Try to parse as JSON first (handles the good cases)
+            if args_str.startswith('{'):
+                try:
+                    args = json.loads(repair_jsonish(args_str))
+                    return {
+                        "id": f"call_{name[:8]}",
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": json.dumps(args),
+                        }
+                    }
+                except Exception:
+                    pass
+
+            # Fallback: treat as a single positional string argument (common in creative output)
+            # e.g. <tool_code>run_command("mkdir foo")</tool_code>
+            # becomes {"command": 'mkdir foo'}  (best effort)
+            args = {"raw": args_str}
+            # Heuristic: if it looks like a single quoted string, extract the content as "command"
+            if (args_str.startswith('"') and args_str.endswith('"')) or (args_str.startswith("'") and args_str.endswith("'")):
+                args = {"command": args_str[1:-1]}
 
             return {
                 "id": f"call_{name[:8]}",

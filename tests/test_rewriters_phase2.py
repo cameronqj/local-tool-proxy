@@ -40,6 +40,14 @@ def test_parse_xml_tool_code():
     assert len(calls) == 1
     assert calls[0]["function"]["name"] == "run_terminal_cmd"
 
+def test_parse_xml_tool_code_with_run_command_style():
+    # Exact format observed in recent Test A run
+    text = '<tool_code>run_command("mkdir multi_tool_test")</tool_code>'
+    calls = parse_xml_content(text, ["run_command"])
+    assert len(calls) == 1
+    assert calls[0]["function"]["name"] == "run_command"
+    assert "mkdir multi_tool_test" in calls[0]["function"]["arguments"]
+
 
 def test_looks_like_detects_variants():
     assert looks_like_tool_call_json('**Tool Call:** run_terminal_cmd{"command": "ls"}')
