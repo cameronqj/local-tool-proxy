@@ -19,12 +19,13 @@ def test_extract_known_tool_names():
     assert extract_known_tool_names(payload) == ["run_terminal_cmd", "write_file"]
 
 
-def test_repair_jsonish():
+def test_repair_jsonish_and_parse_json_content():
+    """repair_jsonish is a helper; the real contract is exercised via parse_json_content."""
     bad = "run_terminal_cmd{'command': 'ls -la',}"
-    cleaned = repair_jsonish(bad)
-    # The function should at minimum make it parseable JSON
-    data = json.loads(cleaned)
-    assert data.get("command") == "ls -la"
+    calls = parse_json_content(bad, ["run_terminal_cmd"])
+    assert len(calls) == 1
+    assert calls[0]["function"]["name"] == "run_terminal_cmd"
+    assert calls[0]["function"]["arguments"]  # should be valid JSON string after repair + parse
 
 
 def test_parse_json_content_with_known_names():

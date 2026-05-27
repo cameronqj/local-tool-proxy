@@ -98,11 +98,16 @@ def _parse_xml_tool_call(text: str) -> Optional[Dict[str, Any]]:
 
             # Fallback: treat as a single positional string argument (common in creative output)
             # e.g. <tool_code>run_command("mkdir foo")</tool_code>
-            # becomes {"command": 'mkdir foo'}  (best effort)
-            args = {"raw": args_str}
-            # Heuristic: if it looks like a single quoted string, extract the content as "command"
-            if (args_str.startswith('"') and args_str.endswith('"')) or (args_str.startswith("'") and args_str.endswith("'")):
-                args = {"command": args_str[1:-1]}
+            # becomes {"command": "mkdir foo"} when the tool name suggests a command runner
+            command_tool_names = {"run_command", "run_terminal_cmd", "shell", "bash", "execute"}
+            if name.lower() in command_tool_names:
+                # Strip surrounding quotes if present
+                val = args_str
+                if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+                    val = val[1:-1]
+                args = {"command": val}
+            else:
+                args = {"raw": args_str}
 
             return {
                 "id": f"call_{name[:8]}",
@@ -178,20 +183,48 @@ def parse_json_content(text: str, known_tool_names: list[str] | None = None) -> 
 
     try:
         data = json.loads(cleaned)
-        items = data if isinstance(data, list) else [data]
+
+        # Unwrap common tool call wrappers: {"tool_calls": [...] } or {"tool_call": [...]}
+        if isinstance(data, dict):
+            if "tool_calls" in data:
+                items = data["tool_calls"] if isinstance(data["tool_calls"], list) else [data["tool_calls"]]
+            elif "tool_call" in data:
+                items = data["tool_call"] if isinstance(data["tool_call"], list) else [data["tool_call"]]
+            else:
+                items = [data]
+        else:
+            items = data if isinstance(data, list) else [data]
 
         for item in items:
             if not isinstance(item, dict):
                 continue
-            name = item.get("name") or item.get("tool") or (item.get("function") or {}).get("name")
+
+            # Handle both flat and nested function shapes
+            func = item.get("function") or item
+            name = func.get("name") or item.get("name") or item.get("tool")
             if not name:
                 continue
-            args = item.get("arguments") or item.get("parameters") or item.get("args") or {}
-            if isinstance(args, str):
+
+            # Support multiple argument key names used by different models/harnesses
+            raw_args = (
+                func.get("arguments")
+                or func.get("parameters")
+                or func.get("args")
+                or func.get("input")
+                or item.get("arguments")
+                or item.get("parameters")
+                or item.get("args")
+                or item.get("input")
+                or {}
+            )
+
+            if isinstance(raw_args, str):
                 try:
-                    args = json.loads(args)
+                    args = json.loads(raw_args)
                 except Exception:
-                    pass
+                    args = {"raw": raw_args}
+            else:
+                args = raw_args
 
             calls.append({
                 "id": f"call_{len(calls)}_{name[:8]}",

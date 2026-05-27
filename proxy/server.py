@@ -23,6 +23,7 @@ import argparse
 import json
 import logging
 import sys
+import uuid
 from typing import Set, Optional, Dict, Any
 
 import httpx
@@ -298,9 +299,25 @@ async def _handle_tool_request_for_compat_model(
     except Exception:
         pass
 
-    logger.info(f"COMPAT TOOL PATH for {model} — forcing non-stream + rewrite attempt (rigid={is_rigid})")
+    trace_id = f"gptfixes-{uuid.uuid4().hex[:12]}"
+    logger.info(f"[{trace_id}] COMPAT TOOL PATH for {model} — forcing non-stream + rewrite attempt (rigid={is_rigid})")
 
-    # Force non-streaming for reliability
+    # Phase 3 improvement: respect per-model preference for forcing non-stream on tool requests
+    # (for now we key off the compat model list; later this can come from profiles)
+    force_non_stream = model and any(m in model.lower() for m in COMPAT_MODELS)
+
+    # Structured logging for the request (Phase 3)
+    try:
+        orig_payload = json.loads(original_body)
+        tools_count = len(orig_payload.get("tools", [])) if orig_payload.get("tools") else 0
+        stream_requested = orig_payload.get("stream", False)
+    except Exception:
+        tools_count = 0
+        stream_requested = None
+
+    logger.info(f"[{trace_id}] request: model={model} mode=compat stream_requested={stream_requested} tools_count={tools_count} rigid={is_rigid}")
+
+    # Force non-streaming for reliability (Phase 3)
     try:
         payload = json.loads(original_body)
         payload["stream"] = False
@@ -361,7 +378,7 @@ async def _handle_tool_request_for_compat_model(
 
             tool_calls = parse_tool_call_from_content(content_str, known_tool_names=tool_names or None)
             if tool_calls:
-                logger.info(f"  ✓ REWROTE tool call(s) for stock OpenCode: { [t['function']['name'] for t in tool_calls] }")
+                logger.info(f"[{trace_id}] ✓ REWROTE tool call(s) for stock OpenCode: { [t['function']['name'] for t in tool_calls] }")
                 rewritten = synthesize_tool_call_response(content_str, tool_calls, finish or "tool_calls")
 
                 # Preserve important fields
@@ -371,12 +388,17 @@ async def _handle_tool_request_for_compat_model(
                 rewritten["model"] = model
 
                 await upstream.aclose()
-                return JSONResponse(content=rewritten)
+                resp = JSONResponse(content=rewritten)
+                resp.headers["x-gptfixes-trace-id"] = trace_id
+                return resp
 
     # No rewrite happened — return original
+    logger.info(f"[{trace_id}] No rewrite needed for {model} (rigid={is_rigid})")
     content = upstream.content
     await upstream.aclose()
-    return Response(content=content, status_code=upstream.status_code)
+    resp = Response(content=content, status_code=upstream.status_code)
+    resp.headers["x-gptfixes-trace-id"] = trace_id
+    return resp
 
 
 # Note: The chat_completions route definition has been moved earlier in the file
