@@ -51,6 +51,11 @@ try:
         build_retry_payload,
         should_use_retry_response,
     )
+    from .planner import (
+        extract_milestones,
+        build_planner_hint,
+        should_use_planner_for_recovery,
+    )
 except ImportError:
     # Allow running as python -m proxy.server from repo root
     from rewriters import (
@@ -69,6 +74,11 @@ except ImportError:
         build_retry_payload,
         should_use_retry_response,
     )
+    from planner import (
+        extract_milestones,
+        build_planner_hint,
+        should_use_planner_for_recovery,
+    )
 
 logging.basicConfig(
     level=logging.INFO,
@@ -82,6 +92,7 @@ OLLAMA_BASE: str = "http://localhost:11434/v1"
 COMPAT_MODELS: Set[str] = set()
 MODE: str = "compat"  # compat | observe | stabilize  (per nextgrok.prompt)
 STABILIZE_MAX_RETRIES: int = 1
+PLANNER_MODE: str = "disabled"  # disabled | observe | soft   (only active with stabilize)
 CLIENT = httpx.AsyncClient(timeout=600.0)  # long timeout for generation
 
 # Simple in-memory per-trace state for drift scoring (Phase 1 Observe)
@@ -104,6 +115,7 @@ async def lifespan(app: FastAPI):
     logger.info(f"  mode: {MODE}")
     if MODE == "stabilize":
         logger.info(f"  stabilize_max_retries: {STABILIZE_MAX_RETRIES}")
+        logger.info(f"  planner: {PLANNER_MODE}")
     logger.info("  Goal: Make stock OpenCode (and similar harnesses) work with small local models")
     logger.info("  via clean in-line translation of tool calling output.")
     yield
@@ -238,6 +250,7 @@ async def health():
         "mode": MODE,
         "active_traces": len(TRACE_DRIFT),
         "stabilize_max_retries": STABILIZE_MAX_RETRIES if MODE == "stabilize" else 0,
+        "planner": PLANNER_MODE,
     }
 
 
@@ -326,12 +339,25 @@ async def _handle_tool_request_for_compat_model(
     """
     # Detect rigid/structured prompts for better diagnostics and future format enforcement
     is_rigid = False
+    first_user_message = ""
+    tool_names: List[str] = []
     try:
         payload_for_detection = json.loads(original_body)
         messages = payload_for_detection.get("messages", [])
         is_rigid = _looks_like_rigid_structured_prompt(messages)
         if is_rigid:
             logger.info(f"RIGID STRUCTURED PROMPT detected for {model} — extra format discipline may be needed")
+
+        # For planner (Phase 3)
+        for m in messages:
+            if m.get("role") == "user":
+                first_user_message = m.get("content", "") or ""
+                break
+        for t in (payload_for_detection.get("tools") or []):
+            fn = t.get("function") or t
+            name = fn.get("name")
+            if name:
+                tool_names.append(name)
     except Exception:
         pass
 
@@ -490,12 +516,26 @@ async def _handle_tool_request_for_compat_model(
     # === Phase 2: Stabilize v1 - single retry with internal steering ===
     if STABILIZE_MAX_RETRIES > 0 and should_attempt_stabilize(category, MODE, had_tools=True):
         for attempt in range(1, STABILIZE_MAX_RETRIES + 1):
+            # Phase 3: optionally enrich steering with soft planner hint
+            steering_message = None
+            if should_use_planner_for_recovery(PLANNER_MODE, MODE == "stabilize"):
+                agenda = extract_milestones(first_user_message, tool_names)
+                hint = build_planner_hint(agenda)
+                if hint:
+                    steering_message = (
+                        "The previous response described an action but did not use a tool. "
+                        f"{hint} "
+                        "Use one of the available tools now, or give a final answer only if the task "
+                        "is genuinely complete."
+                    )
+                    logger.info(f"[{trace_id}] planner_soft_hint_used: agenda={agenda[:3]}")
+
             logger.info(f"[{trace_id}] STABILIZE ATTEMPT {attempt}/{STABILIZE_MAX_RETRIES} "
                         f"category={category} — performing internal retry with steering message")
 
             try:
                 orig_payload = json.loads(original_body)
-                retry_payload = build_retry_payload(orig_payload)
+                retry_payload = build_retry_payload(orig_payload, steering_message=steering_message)
 
                 # Call upstream again (we are already forcing non-stream in this path)
                 retry_upstream = await CLIENT.post(url, json=retry_payload, headers=headers)
@@ -559,13 +599,16 @@ def main():
                         help="NextGrok mode: compat (default, format repair only), observe (diagnostics + drift), stabilize (experimental interventions)")
     parser.add_argument("--stabilize-max-retries", type=int, default=1,
                         help="Max automatic upstream retries when in stabilize mode (default 1, conservative)")
+    parser.add_argument("--planner", default="disabled", choices=["disabled", "observe", "soft"],
+                        help="Soft planner mode (only effective with --mode stabilize): disabled | observe | soft")
     args = parser.parse_args()
 
-    global OLLAMA_BASE, COMPAT_MODELS, MODE, STABILIZE_MAX_RETRIES
+    global OLLAMA_BASE, COMPAT_MODELS, MODE, STABILIZE_MAX_RETRIES, PLANNER_MODE
     OLLAMA_BASE = args.ollama_base
     COMPAT_MODELS = {m.strip().lower() for m in args.compat_models.split(",") if m.strip()}
     MODE = args.mode
     STABILIZE_MAX_RETRIES = max(0, args.stabilize_max_retries)
+    PLANNER_MODE = args.planner
 
     import uvicorn
     logger.info(f"Starting local-tool-proxy on {args.host}:{args.port}  mode={MODE}")
