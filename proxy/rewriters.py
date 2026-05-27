@@ -23,6 +23,16 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 
+def extract_known_tool_names(request_payload: dict) -> list[str]:
+    """Extract tool names from an OpenAI-style request for guided parsing."""
+    names = []
+    for t in request_payload.get("tools", []) or []:
+        fn = t.get("function") or t
+        if name := fn.get("name"):
+            names.append(name)
+    return names
+
+
 def looks_like_tool_call_json(text: str) -> bool:
     """
     Heuristic: does this text blob look like it is trying to express one or more tool calls
@@ -121,43 +131,121 @@ def _extract_balanced_json(text: str, start_index: int) -> Optional[str]:
     return None
 
 
-def _parse_json_tool_call_fallback(text: str, known_tool_names: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
-    """
-    ToolBridge-style JSON fallback for models that output things like:
-      run_terminal_cmd{"command": "ls"}
-      write_file({...})
-    """
+def repair_jsonish(text: str, repairs: list[str] | None = None) -> str:
+    """Apply common JSON repairs (single quotes, unquoted keys, trailing commas, fences)."""
     if not text:
-        return None
-    names = known_tool_names or []
-    for name in names:
-        # Look for name{ or name( {
-        pattern = re.compile(re.escape(name) + r'\s*(?:\(\s*)?(\{)', re.IGNORECASE)
-        m = pattern.search(text)
-        if not m:
-            continue
-        brace_idx = text.find('{', m.start())
-        if brace_idx == -1:
-            continue
-        json_str = _extract_balanced_json(text, brace_idx)
-        if not json_str:
-            continue
-        try:
-            # Light cleanup (single quotes, unquoted keys, trailing commas) - same spirit as ToolBridge
-            cleaned = re.sub(r"'", '"', json_str)
-            cleaned = re.sub(r'(\w+)\s*:', r'"\1":', cleaned)
-            cleaned = re.sub(r',\s*}', '}', cleaned)
-            args = json.loads(cleaned)
-            return {
-                "id": f"call_{name[:8]}",
+        return text
+    repairs = repairs or ["strip_fences", "single_quotes", "unquoted_keys", "trailing_commas"]
+
+    cleaned = text.strip()
+    if "strip_fences" in repairs:
+        cleaned = re.sub(r'^```(?:json)?\s*|\s*```$', '', cleaned, flags=re.IGNORECASE | re.DOTALL).strip()
+
+    if "single_quotes" in repairs:
+        cleaned = cleaned.replace("'", '"')
+    if "unquoted_keys" in repairs:
+        cleaned = re.sub(r'(\w+)\s*:', r'"\1":', cleaned)
+    if "trailing_commas" in repairs:
+        cleaned = re.sub(r',\s*([}\]])', r'\1', cleaned)
+
+    return cleaned
+
+
+def parse_json_content(text: str, known_tool_names: list[str] | None = None) -> list[dict]:
+    """Parse JSON or JSON-like tool calls from content."""
+    if not text or not looks_like_tool_call_json(text):
+        return []
+
+    cleaned = repair_jsonish(text)
+    calls = []
+
+    try:
+        data = json.loads(cleaned)
+        items = data if isinstance(data, list) else [data]
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name") or item.get("tool") or (item.get("function") or {}).get("name")
+            if not name:
+                continue
+            args = item.get("arguments") or item.get("parameters") or item.get("args") or {}
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    pass
+
+            calls.append({
+                "id": f"call_{len(calls)}_{name[:8]}",
                 "type": "function",
                 "function": {
                     "name": name,
-                    "arguments": json.dumps(args) if isinstance(args, dict) else str(args),
+                    "arguments": json.dumps(args) if isinstance(args, (dict, list)) else str(args),
                 }
-            }
+            })
+    except Exception:
+        # Try the ToolBridge-style name{json} fallback
+        for name in (known_tool_names or []):
+            pattern = re.compile(re.escape(name) + r'\s*(?:\(\s*)?(\{)', re.IGNORECASE)
+            m = pattern.search(text)
+            if not m:
+                continue
+            brace_idx = text.find('{', m.start())
+            if brace_idx == -1:
+                continue
+            json_str = _extract_balanced_json(text, brace_idx)
+            if not json_str:
+                continue
+            try:
+                args = json.loads(repair_jsonish(json_str))
+                calls.append({
+                    "id": f"call_{len(calls)}_{name[:8]}",
+                    "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(args)},
+                })
+                break
+            except Exception:
+                continue
+
+    return calls
+
+
+def parse_xml_content(text: str, known_tool_names: list[str] | None = None) -> list[dict]:
+    """Parse XML-like tool call formats."""
+    # Reuse and slightly generalize the existing _parse_xml_tool_call logic
+    result = _parse_xml_tool_call(text)
+    return [result] if result else []
+
+
+def parse_tool_call_from_content(
+    content: str,
+    known_tool_names: list[str] | None = None,
+) -> list[dict] | None:
+    """
+    Best-effort extraction using a clear strategy list (Phase 2 architecture).
+    """
+    if not content:
+        return None
+
+    text = content.strip()
+    if not looks_like_tool_call_json(text):
+        return None
+
+    strategies = [
+        lambda t: parse_json_content(t, known_tool_names),
+        lambda t: parse_xml_content(t, known_tool_names),
+        # Legacy raw function_call and single tool text can be added here
+    ]
+
+    for strategy in strategies:
+        try:
+            calls = strategy(text)
+            if calls:
+                return calls
         except Exception:
             continue
+
     return None
 
 
