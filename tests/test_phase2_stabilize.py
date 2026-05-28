@@ -48,9 +48,9 @@ def test_build_retry_payload_does_not_mutate_user_messages():
     assert retry["messages"][1]["role"] == "user"
     assert "Fix the bug" in retry["messages"][1]["content"]
 
-    # Steering message added as last message
+    # Steering message added as last message (default path when no category-specific steering)
     assert retry["messages"][-1]["role"] == "system"
-    assert "did not use a tool" in retry["messages"][-1]["content"]
+    assert "did not use a tool" in retry["messages"][-1]["content"] or "Analyze what went wrong" in retry["messages"][-1]["content"]
 
     # stream forced off
     assert retry["stream"] is False
@@ -137,8 +137,44 @@ def test_stabilize_v1_end_to_end_mock():
     print("Phase 2 stabilize v1 end-to-end mock test PASSED")
 
 
+def test_strengthened_steering_messages_haystack_inspired():
+    """Verify the new category-specific steering contains the key lightweight nudges."""
+    from proxy.stabilizer import (
+        LITERAL_COMMANDS_STEERING,
+        TOOL_INTENT_PROSE_STEERING,
+        build_retry_payload,
+    )
+
+    # Both should contain the "analyze + adapt + exactly one" pattern
+    for text in (LITERAL_COMMANDS_STEERING, TOOL_INTENT_PROSE_STEERING):
+        assert "Analyze what went wrong" in text
+        assert "Adapt your strategy" in text
+        assert "exactly one" in text.lower() or "EXACTLY ONE" in text
+        assert "available list" in text.lower()
+
+    # build_retry_payload with available_tool_names should produce the prescriptive guardrail
+    payload = {
+        "model": "gemma4:e4b-mlx",
+        "messages": [{"role": "user", "content": "do something"}],
+        "tools": [{"type": "function", "function": {"name": "write_file"}}],
+    }
+    retry = build_retry_payload(
+        payload,
+        steering_message=LITERAL_COMMANDS_STEERING,
+        prepend_steering=True,
+        available_tool_names=["write_file", "read_file"],
+    )
+    steering = retry["messages"][0]["content"]
+    assert "You may ONLY call tools from this exact list" in steering
+    assert "write_file" in steering
+    assert "Never invent tool names" in steering
+
+    print("Strengthened Haystack-inspired steering messages: OK")
+
+
 if __name__ == "__main__":
     test_should_attempt_stabilize()
     test_build_retry_payload_does_not_mutate_user_messages()
     test_stabilize_v1_end_to_end_mock()
+    test_strengthened_steering_messages_haystack_inspired()
     print("All Phase 2 tests passed.")

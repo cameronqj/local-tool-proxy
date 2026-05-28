@@ -50,6 +50,8 @@ try:
         should_attempt_stabilize,
         build_retry_payload,
         should_use_retry_response,
+        LITERAL_COMMANDS_STEERING,
+        TOOL_INTENT_PROSE_STEERING,
     )
     from .planner import (
         extract_milestones,
@@ -73,6 +75,8 @@ except ImportError:
         should_attempt_stabilize,
         build_retry_payload,
         should_use_retry_response,
+        LITERAL_COMMANDS_STEERING,
+        TOOL_INTENT_PROSE_STEERING,
     )
     from planner import (
         extract_milestones,
@@ -518,18 +522,24 @@ async def _handle_tool_request_for_compat_model(
     # === Phase 2: Stabilize v1 - single retry with internal steering ===
     if STABILIZE_MAX_RETRIES > 0 and should_attempt_stabilize(category, MODE, had_tools=True):
         for attempt in range(1, STABILIZE_MAX_RETRIES + 1):
-            # Phase 3: optionally enrich steering with soft planner hint
-            steering_message = None
+            # Build a stronger, category-aware steering message.
+            # Both collapse categories now get explicit Haystack-derived nudges:
+            # "analyze failure → adapt → think step-by-step → exactly one tool call"
+            # plus the prescriptive available-tools list (injected by build_retry_payload).
+            if category == "literal_commands":
+                steering_message = LITERAL_COMMANDS_STEERING
+            else:
+                steering_message = TOOL_INTENT_PROSE_STEERING
+
+            # Phase 3: optionally enrich with soft planner hint
             if should_use_planner_for_recovery(PLANNER_MODE, MODE == "stabilize"):
                 agenda = extract_milestones(first_user_message, tool_names)
                 hint = build_planner_hint(agenda)
                 if hint:
-                    steering_message = (
+                    base = steering_message or (
                         "The previous response described an action but did not use a tool. "
-                        f"{hint} "
-                        "Use one of the available tools now, or give a final answer only if the task "
-                        "is genuinely complete."
                     )
+                    steering_message = f"{base} {hint}"
                     logger.info(f"[{trace_id}] planner_soft_hint_used: agenda={agenda[:3]}")
 
             logger.info(f"[{trace_id}] STABILIZE ATTEMPT {attempt}/{STABILIZE_MAX_RETRIES} "
@@ -537,7 +547,18 @@ async def _handle_tool_request_for_compat_model(
 
             try:
                 orig_payload = json.loads(original_body)
-                retry_payload = build_retry_payload(orig_payload, steering_message=steering_message)
+
+                # Stronger retry tactics (Haystack Gemma cookbook signal + rigid-prompt data):
+                # - tool_choice: "required" (API-level pressure)
+                # - Prepend "analyze failure → adapt strategy → think step-by-step → exactly one tool call"
+                # - Prescriptive available-tools list ("use ONLY from this exact list")
+                retry_payload = build_retry_payload(
+                    orig_payload,
+                    steering_message=steering_message,
+                    prepend_steering=True,
+                    tool_choice="required",           # strongest lever if the backend honors it
+                    available_tool_names=tool_names if tool_names else None,
+                )
 
                 # Call upstream again (we are already forcing non-stream in this path)
                 retry_upstream = await CLIENT.post(url, json=retry_payload, headers=headers)

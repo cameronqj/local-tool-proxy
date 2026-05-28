@@ -314,3 +314,17 @@ For the rigid stress-test class:
 This document is intentionally more ambitious than the "Phase 7/8" sketches in the original `gptfixes.prompt`, while still respecting the same core constraints around transparency, auditability, and not becoming a hidden agent runtime.
 
 The bet is that explicit, observable stabilization + lightweight planning will be more robust and honest than either (a) hoping better prompting alone solves it, or (b) pretending the format repair layer is sufficient for real agentic work with these models.
+
+## Post-implementation note (lightweight Haystack-derived nudges)
+
+After external validation against the Haystack Gemma 4 E4B cookbook (multimodal weather agent + GitHub MCP agent), the following strictly non-scope-violating improvements were landed inside the existing stabilize retry path only:
+
+- Stronger prepended steering for both `literal_commands` and `tool_intent_prose` containing:
+  - "Analyze what went wrong. Adapt your strategy."
+  - Explicit "Think step by step... emit EXACTLY ONE properly formatted tool call for the first/next step only."
+- Prescriptive available-tools injection: "You may ONLY call tools from this exact list: [...]. Never invent tool names."
+- These nudges are the minimal portable signal from Haystack's successful (scaffolded) demos and from their own later failure case (where Gemma fell back to `call:foo(...)` syntax + hallucinated tools once the catalog grew and context was truncated).
+
+All changes live only in `proxy/stabilizer.py` (constants + `build_retry_payload`) and the call site in `server.py:520`. No new loops, no tool synthesis, no user-prompt mutation, fully gated behind `--mode stabilize`, and covered by updated unit tests. Replays with `--mode compat` are unaffected.
+
+This iteration keeps the proxy as behavior-changing middleware, not a hidden agent runtime.
