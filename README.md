@@ -97,6 +97,29 @@ make demo
 
 Everything runs in-process on localhost — no GPU, no model download.
 
+## Docker
+
+Run the same no-Ollama demo in a container:
+
+```bash
+make docker-demo
+```
+
+Or serve the proxy from the container against a local Ollama:
+
+```bash
+make docker-run
+# or, manually:
+docker build -t local-tool-proxy .
+docker run --rm -p 9000:9000 local-tool-proxy \
+  --ollama-base http://host.docker.internal:11434/v1
+```
+
+Inside the container the proxy binds `0.0.0.0` so the published port is reachable
+from the host. `host.docker.internal` resolves to the host's Ollama on Docker
+Desktop (macOS/Windows); on Linux add `--add-host=host.docker.internal:host-gateway`.
+Review [SECURITY.md](SECURITY.md) before exposing the proxy beyond your machine.
+
 ## Minimal SDK Example
 
 Any client that accepts an OpenAI-compatible base URL can point at the proxy. For
