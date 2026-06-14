@@ -25,8 +25,17 @@ import logging
 import sys
 import time
 import uuid
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
 from typing import Set, Optional, Dict, Any
+
+try:
+    # Single source of truth: the version declared in pyproject.toml, read from
+    # the installed package metadata so it never drifts from the app's reported
+    # version.
+    __version__ = _pkg_version("local-tool-proxy")
+except PackageNotFoundError:  # running from a source tree without an install
+    __version__ = "0.0.0+source"
 
 import httpx
 from contextlib import asynccontextmanager
@@ -140,7 +149,7 @@ async def lifespan(app: FastAPI):
     await CLIENT.aclose()
 
 
-app = FastAPI(title="local-tool-proxy", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="local-tool-proxy", version=__version__, lifespan=lifespan)
 
 
 def is_compat_model(model: str) -> bool:
