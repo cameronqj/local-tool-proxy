@@ -6,15 +6,14 @@ Rewriters / adapters for small local models.
 Goal: Turn the messy but often-correct output of Gemma 4 E*, gpt-oss, etc.
 into the clean streaming tool_calls format that normal OpenCode-like harnesses expect.
 
-This module is intentionally small and focused. It is the heart of what makes
-the in-line proxy valuable for running small local models on consumer hardware.
+This module is intentionally small and focused. It is the core repair logic of
+the proxy: turning recoverable-but-malformed tool intent into valid tool_calls.
 
 Current status: tested parsers for JSON-in-content, JSON-ish repairs,
-toolName{...} snippets, and XML-ish tool blocks. Future parser additions may
-include legacy function_call variants and reasoning_content stripping, drawing from:
-  - SmallHarness fallback logic (looks_like_start_of_tool_call, try_parse_inline_tool_call, etc.)
-  - OpenCode PR #16531 toolParser (json / raw-function-call / single-tool-text + SSE rewriting)
-  - Real failure traces we collected earlier in this repo
+toolName{...} snippets, and XML-ish tool blocks. The shapes here were derived
+from real failure traces collected while running small local models against
+OpenAI-compatible harnesses. Possible future additions include legacy
+function_call variants and reasoning_content stripping.
 """
 
 import json

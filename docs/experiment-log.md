@@ -51,11 +51,14 @@ The mock rewrite test validates the central mechanism in a controlled setting:
 Current local verification:
 
 ```text
-20 passed
+25 passed
 ```
 
 That is the strongest positive result so far. It demonstrates that the proxy can
 repair a specific, common wire-format failure without requiring a patched client.
+The claim boundaries — repair on malformed intent, *no* fabrication on prose or
+unparseable content, and sanitized repair diagnostics — are pinned end-to-end in
+`tests/test_claim_boundaries.py`.
 
 ## Live Ollama Smoke Test
 
