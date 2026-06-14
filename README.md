@@ -84,8 +84,41 @@ curl http://localhost:9000/health
 curl http://localhost:9000/v1/models
 ```
 
-The earlier development command name, `gptfixes`, is still installed as a
-temporary compatibility alias. Public docs and examples use `local-tool-proxy`.
+## Demo (no Ollama required)
+
+Want to see the repair happen without installing a model? Run the self-contained
+demo. It starts a mock "local model" that emits the broken tool-call shapes small
+models produce, puts the proxy in front of it, and shows the before/after for each:
+
+```bash
+make demo
+# or: python3 demo.py
+```
+
+Everything runs in-process on localhost — no GPU, no model download.
+
+## Docker
+
+Run the same no-Ollama demo in a container:
+
+```bash
+make docker-demo
+```
+
+Or serve the proxy from the container against a local Ollama:
+
+```bash
+make docker-run
+# or, manually:
+docker build -t local-tool-proxy .
+docker run --rm -p 9000:9000 local-tool-proxy \
+  --ollama-base http://host.docker.internal:11434/v1
+```
+
+Inside the container the proxy binds `0.0.0.0` so the published port is reachable
+from the host. `host.docker.internal` resolves to the host's Ollama on Docker
+Desktop (macOS/Windows); on Linux add `--add-host=host.docker.internal:host-gateway`.
+Review [SECURITY.md](SECURITY.md) before exposing the proxy beyond your machine.
 
 ## Minimal SDK Example
 
@@ -203,10 +236,10 @@ Run linting:
 python3 -m ruff check .
 ```
 
-Run the mock rewrite test directly:
+Run the mock rewrite integration test directly:
 
 ```bash
-python3 -m proxy.test_rewrite_mock
+python3 -m pytest tests/test_integration_mock.py
 ```
 
 That test starts a mock upstream and a local proxy, then verifies that an OpenAI

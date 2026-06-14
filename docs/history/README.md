@@ -28,3 +28,9 @@ Current public narrative:
 
 That is the line to preserve: protocol repair works in controlled tests, real
 harness behavior is improving, and verified task artifacts remain the bar.
+
+## Captured notes
+
+- [2026-05-26-gemma4-agentic-testing.md](2026-05-26-gemma4-agentic-testing.md) —
+  raw speed/memory characterization and early agentic-testing notes on the
+  author's hardware (machine-specific, kept for provenance).

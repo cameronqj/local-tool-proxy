@@ -122,7 +122,7 @@ That matters. The public claim should be:
 
 Evidence sources used for this summary:
 
-- `results-gemma-and-agentic-testing.md`
+- `docs/history/2026-05-26-gemma4-agentic-testing.md`
 - `eval/results/summary_stabilize_soft_2026-05-27.md`
 - `eval/results/*.json`
 - `eval/logs/proxy_*.log`

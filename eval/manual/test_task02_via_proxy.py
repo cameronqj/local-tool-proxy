@@ -9,8 +9,8 @@ against the proxy, trying to complete the clean "bugfix" task:
 - Write test_buggy.py with >=3 pytest cases that would have failed before
 - Run pytest and confirm everything passes
 
-Usage on your real machine (with Ollama + gemma4:e4b-mlx running):
-    python3 -m proxy.test_task02_via_proxy
+Usage (with a local Ollama + gemma4:e4b-mlx running):
+    python3 eval/manual/test_task02_via_proxy.py
 
 It will use the proxy at http://localhost:9000 by default (start it first with ./proxy/start.sh).
 

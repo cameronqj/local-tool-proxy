@@ -603,7 +603,7 @@ async def _handle_tool_request_for_compat_model(
     """
     Special path for stock OpenCode + small models on tool-using turns.
 
-    Strategy (pragmatic, high success rate on M4 Air):
+    Strategy (pragmatic, reliable for small local models):
     - Force non-streaming to the upstream (more reliable for Gemma 4 E* tool calling).
     - On the response, use rewriters.py to convert "JSON in content" into proper tool_calls.
     - Return a clean response that stock OpenCode's AI SDK can parse without issues.

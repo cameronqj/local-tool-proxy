@@ -13,19 +13,19 @@ This makes it easy to:
 Usage examples:
 
     # Test A (multi-tool stress)
-    python3 -m proxy.test_rigid_prompt \
+    python3 eval/manual/test_rigid_prompt.py \
         --prompt-file prompts/rigid_tests/test_A_multi_tool_stress.txt \
         --expected-commits "run_terminal_cmd,write_file" \
         --require-numbered-steps
 
     # Test B (structured CLI)
-    python3 -m proxy.test_rigid_prompt \
+    python3 eval/manual/test_rigid_prompt.py \
         --prompt-file prompts/rigid_tests/test_B_structured_cli.txt \
         --expected-commits "feat: add CLI scaffold,feat: implement core logic,docs: add usage" \
         --require-numbered-steps
 
-    # Old Tic-Tac-Toe prompt (still works)
-    python3 -m proxy.test_rigid_prompt --prompt-file prompts/rigid_tictactoe_example.txt
+    # Tic-Tac-Toe prompt
+    python3 eval/manual/test_rigid_prompt.py --prompt-file prompts/rigid_tictactoe_example.txt
 """
 
 import argparse

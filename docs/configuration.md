@@ -6,9 +6,6 @@ The main command is:
 local-tool-proxy
 ```
 
-The old `gptfixes` command remains as a temporary compatibility alias for early
-local checkouts. New examples should use `local-tool-proxy`.
-
 ## Common Options
 
 ```bash

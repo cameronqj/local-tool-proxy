@@ -19,11 +19,11 @@ from typing import Dict, List
 
 
 COLLAPSE_LINE_RE = re.compile(
-    r"\[(?P<trace>(?:ltp|gptfixes)-[a-f0-9]+)\] collapse: category=(?P<cat>\w+) signals=\[(?P<signals>[^\]]*)\]"
+    r"\[(?P<trace>ltp-[a-f0-9]+)\] collapse: category=(?P<cat>\w+) signals=\[(?P<signals>[^\]]*)\]"
 )
 # Also support the slightly different format used in some log examples
 COLLAPSE_LINE_RE2 = re.compile(
-    r"\[(?P<trace>(?:ltp|gptfixes)-[^\]]+)\] collapse: category=(?P<cat>\w+)"
+    r"\[(?P<trace>ltp-[^\]]+)\] collapse: category=(?P<cat>\w+)"
 )
 
 
