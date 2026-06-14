@@ -1,0 +1,30 @@
+You are an expert Python CLI developer.
+
+Task: Create a small command-line tool called "wordstats" that analyzes text.
+
+Strict Requirements (you must follow all of them exactly):
+
+1. The project must be in a directory called "wordstats_cli".
+2. You must create exactly these 4 files:
+   - wordstats_cli/main.py
+   - wordstats_cli/__init__.py
+   - README.md
+   - requirements.txt
+
+3. You must make exactly 3 git commits with these exact messages (in this order):
+   - "Initial CLI structure and argument parsing"
+   - "Add word counting and character analysis logic"
+   - "Add README and finalize packaging"
+
+4. Output format rule: After every tool call result, you must output exactly one line in this format:
+   STEP <number>: <very short description of what you just did>
+
+   Example:
+   STEP 3: Created main.py with argparse
+
+5. You must not output any other text outside of the STEP lines until the very end.
+
+6. At the very end, after the last commit, output exactly:
+   FINAL: Project complete with 3 commits as specified.
+
+Begin now. Use tools to create the files and run git commands.

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "small-local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Local Proxy (Gemma 4 + fixes)",
+      "options": {
+        "baseURL": "http://localhost:9000/v1"
+      },
+      "models": {
+        "gemma4:e4b-mlx": {
+          "name": "Gemma 4 E4B (via proxy)",
+          "tools": true,
+          "limit": {
+            "context": 128000,
+            "output": 8192
+          }
+        },
+        "gemma4:e2b-mlx": {
+          "name": "Gemma 4 E2B (fast via proxy)",
+          "tools": true
+        }
+      }
+    }
+  }
+}

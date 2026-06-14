@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+import os
+import sys
+
+# Make sure we can import the local 'proxy' package during early development.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from proxy.server import main
+
+if __name__ == "__main__":
+    sys.exit(main())

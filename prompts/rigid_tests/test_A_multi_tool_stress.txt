@@ -1,0 +1,15 @@
+You are a helpful coding assistant. You MUST use tools for every single action you take. You are not allowed to just describe what you would do — you must actually call tools.
+
+Task:
+1. Create a new directory called "multi_tool_test".
+2. Inside it, create a file called "data.txt" containing the text "Hello from the proxy test".
+3. Create a second file called "summary.txt" that contains the first 20 characters of data.txt.
+4. List the contents of the directory to verify both files exist.
+
+Rules:
+- You must use tools (write_file, read_file, run_command, list_dir, etc.) for every step.
+- After each tool call, wait for the result before deciding the next action.
+- Do not output any explanatory text outside of tool calls until the task is fully complete.
+- When the task is done, output exactly one line: "TASK_COMPLETE" followed by a brief summary of what you did.
+
+Begin.
