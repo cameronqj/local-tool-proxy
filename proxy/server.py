@@ -711,7 +711,6 @@ async def _handle_tool_request_for_compat_model(
     if choices:
         msg = choices[0].get("message", {}) or {}
         content_str = msg.get("content") or ""
-        finish = choices[0].get("finish_reason")
 
         # Extract the full declared tool specs so the decision layer can do
         # schema-aware validation (required args) — not just name-guided parsing.
@@ -764,7 +763,10 @@ async def _handle_tool_request_for_compat_model(
             except Exception:
                 pass
 
-            rewritten = synthesize_tool_call_response(content_str, tool_calls, finish or "tool_calls")
+            # This branch only runs when content was rewritten into tool_calls, so
+            # the response must report finish_reason "tool_calls" (not the upstream
+            # "stop") or strict OpenAI clients will not execute the call.
+            rewritten = synthesize_tool_call_response(content_str, tool_calls)
 
             # Preserve important fields
             for key in ("id", "object", "created", "model", "usage", "system_fingerprint"):
