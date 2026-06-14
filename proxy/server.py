@@ -140,7 +140,7 @@ async def lifespan(app: FastAPI):
     await CLIENT.aclose()
 
 
-app = FastAPI(title="local-tool-proxy", version="0.1.0-dev", lifespan=lifespan)
+app = FastAPI(title="local-tool-proxy", version="0.1.0", lifespan=lifespan)
 
 
 def is_compat_model(model: str) -> bool:
