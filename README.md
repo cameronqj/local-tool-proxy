@@ -84,9 +84,6 @@ curl http://localhost:9000/health
 curl http://localhost:9000/v1/models
 ```
 
-The earlier development command name, `gptfixes`, is still installed as a
-temporary compatibility alias. Public docs and examples use `local-tool-proxy`.
-
 ## Minimal SDK Example
 
 Any client that accepts an OpenAI-compatible base URL can point at the proxy. For
@@ -203,10 +200,10 @@ Run linting:
 python3 -m ruff check .
 ```
 
-Run the mock rewrite test directly:
+Run the mock rewrite integration test directly:
 
 ```bash
-python3 -m proxy.test_rewrite_mock
+python3 -m pytest tests/test_integration_mock.py
 ```
 
 That test starts a mock upstream and a local proxy, then verifies that an OpenAI

@@ -10,7 +10,7 @@ This is the closest we can get to "stock OpenCode via proxy" without
 actually running the full OpenCode binary.
 
 Run this while the proxy is running:
-    python3 -m proxy.test_with_clean_task
+    python3 eval/manual/test_with_clean_task.py
 """
 
 import os

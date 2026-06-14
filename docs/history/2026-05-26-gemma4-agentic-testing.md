@@ -1,5 +1,10 @@
 # Gemma 4 + Agentic Testing Results on 24 GB M4 Air (Fanless)
 
+> **Historical note.** These are raw benchmarking and exploration notes captured
+> on the author's hardware on 2026-05-26, kept for provenance. Numbers are
+> machine-specific and not a portable benchmark. Current guidance lives in the
+> top-level [README](../../README.md) and [docs/](../).
+
 Date: 2026-05-26
 Hardware: MacBook Air 15" M4, 24 GB unified, macOS 26.5 (same as original README)
 
@@ -127,11 +132,11 @@ HTTP Request: ... 200 OK
 
 This is the strongest evidence yet that the in-line proxy solves the primary failure mode that prevented stock OpenCode from working with Gemma 4 E4B on this hardware.
 
-Full reproduction script: `proxy/test_rewrite_mock.py` (can be run anytime with `python3 -m proxy.test_rewrite_mock`).
+Full reproduction script: `tests/test_integration_mock.py` (can be run anytime with `python3 -m pytest tests/test_integration_mock.py`).
 
 The remaining gap for a complete "stock OpenCode" end-to-end on real hardware is only the actual binary + real Ollama/Gemma (which this simulation faithfully reproduces the client-side experience of).
 
-Full instructions for testing with real stock OpenCode on your machine are in `proxy/TESTING.md`. It includes the exact prompt using our Task 02, config to copy, what logs to watch for, and verification commands.
+Instructions for testing with real stock OpenCode are in [docs/testing.md](../testing.md). It covers the prompt using Task 02, config to copy, what logs to watch for, and verification commands.
 
 ### Remaining work for full streaming support
 
@@ -288,4 +293,4 @@ Prefill on direct was strong (46–113+ tok/s depending on prompt length). ctx c
 
 Also updated `benchmark.py` with first-class support for the direct keys (`gemma4:12b-qat-mtp`, `gemma4:12b-qat`) so future S/M/L runs are one-liner reproducible.
 
-See `proxy/TESTING.md` for the exact commands to run the final verification with real inference.
+See [docs/testing.md](../testing.md) for the commands to run the final verification with real inference.

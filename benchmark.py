@@ -72,7 +72,7 @@ The prompt context is long on purpose to simulate real 8k-16k token agent sessio
 
 # Direct llama.cpp (custom build / local GGUF / MTP drafter) support.
 # These bypass Ollama so we can exercise --spec-type draft-mtp etc and exact -ngl.
-# Tweak ngl / ctx / ngld per hardware (24 GB fanless M4 here uses partial or full + drafter headroom).
+# Tweak ngl / ctx / ngld to fit your hardware's memory and offload headroom.
 DIRECT_LLAMA = str(Path.home() / "llama.cpp-mtp" / "build" / "bin" / "llama-cli")
 # Note: this build's llama-cli prints a warning that --no-conversation is not supported
 # and suggests llama-completion. However, the MTP --spec-type draft-mtp + --model-draft
@@ -281,7 +281,7 @@ def benchmark_model(model: str, sizes=("S", "M", "L")):
                 print(f"    total wall: {stats['total_duration_s']:.1f}s")
         except Exception as e:
             print(f"    ERROR on {size}: {e}")
-        time.sleep(2)  # brief cool-down between runs on fanless
+        time.sleep(2)  # brief cool-down between runs
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:

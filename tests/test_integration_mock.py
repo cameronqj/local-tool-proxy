@@ -10,13 +10,11 @@ This spins up:
   that it received proper tool_calls in the response.
 
 Run:
-    python3 -m proxy.test_rewrite_mock
+    python3 -m pytest tests/test_integration_mock.py
 
 This validates the core rewrite logic that is intended to make stock OpenCode work.
 """
 
-import asyncio
-import json
 import threading
 import time
 from contextlib import contextmanager
@@ -25,7 +23,6 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from openai import OpenAI
-import httpx
 
 # --- Mock upstream that always emits the "bad" pattern Gemma 4 often produces ---
 mock_app = FastAPI()

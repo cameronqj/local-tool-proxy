@@ -29,7 +29,6 @@ dev = [
 
 [project.scripts]
 local-tool-proxy = "proxy.server:main"
-gptfixes = "proxy.server:main"
 
 [project.urls]
 Homepage = "https://github.com/cameronqj/local-tool-proxy"
@@ -44,7 +43,7 @@ include = ["proxy*"]
 "*" = ["*.json", "*.md"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "proxy/test_rewrite_mock.py"]
+testpaths = ["tests"]
 addopts = "-q"
 
 [tool.ruff]
@@ -53,7 +52,6 @@ target-version = "py39"
 extend-exclude = [
     "benchmark.py",
     "eval",
-    "proxy/test_*.py",
 ]
 
 [tool.ruff.lint]

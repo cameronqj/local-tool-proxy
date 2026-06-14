@@ -22,10 +22,10 @@ your user Python environment.
 
 ## Useful Commands
 
-Run the mock upstream rewrite test:
+Run the mock upstream rewrite integration test:
 
 ```bash
-python3 -m proxy.test_rewrite_mock
+python3 -m pytest tests/test_integration_mock.py
 ```
 
 Start the proxy against Ollama:
@@ -77,8 +77,6 @@ When adding a new input format, include tests for:
 - Experimental behavior is behind a flag.
 - No raw private prompts, local paths, tokens, or machine-specific logs are committed.
 - The proxy still never executes tools.
-- Public-facing language uses `local-tool-proxy` unless referring to a historical
-  compatibility alias.
 
 ## Scope Boundaries
 
