@@ -151,3 +151,88 @@ def test_trace_records_repair_status_and_reason(compat_client, tmp_path):
     blob = trace_file.read_text()
     assert "buggy" not in blob
     assert "Use a tool to do the task" not in blob
+    # The repair carries an explicit reason code.
+    assert rewrite["reason"] == "repaired_json_content"
+
+
+# --- Schema-aware abstention through the real compat path ------------------
+#
+# These pin the hardened behavior: a tool *name* alone is never enough. The
+# proxy validates recovered calls against the declared schema and abstains —
+# with an explicit reason code — rather than emit an incomplete or unknown call.
+
+
+def _post_with_full_tools(client: TestClient, tools_full):
+    return client.post(
+        "/v1/chat/completions",
+        json={
+            "model": COMPAT_MODEL,
+            "messages": [{"role": "user", "content": "Use a tool to do the task."}],
+            "tools": tools_full,
+            "tool_choice": "auto",
+        },
+    )
+
+
+_WRITE_FILE_REQUIRED_PATH = {
+    "type": "function",
+    "function": {
+        "name": "write_file",
+        "description": "write_file",
+        "parameters": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+            "required": ["path"],
+        },
+    },
+}
+
+
+def test_missing_required_args_does_not_become_a_tool_call(compat_client):
+    """A tool name with the required arg missing must NOT be fabricated into a
+    call. The proxy abstains and leaves the content for the harness."""
+    upstream = _upstream_response('{"name": "write_file", "arguments": {}}')
+    with patch.object(srv.CLIENT, "post", new_callable=AsyncMock, return_value=upstream):
+        resp = _post_with_full_tools(compat_client, [_WRITE_FILE_REQUIRED_PATH])
+
+    assert resp.status_code == 200
+    assert _tool_calls_of(resp) == []
+    assert resp.headers.get("x-local-tool-proxy-reason") == "abstain_missing_required_args"
+
+
+def test_unknown_tool_name_abstains(compat_client):
+    """A recovered call for a tool that was never declared must abstain."""
+    upstream = _upstream_response('{"name": "delete_everything", "arguments": {"x": 1}}')
+    with patch.object(srv.CLIENT, "post", new_callable=AsyncMock, return_value=upstream):
+        resp = _post_with_full_tools(compat_client, [_WRITE_FILE_REQUIRED_PATH])
+
+    assert resp.status_code == 200
+    assert _tool_calls_of(resp) == []
+    assert resp.headers.get("x-local-tool-proxy-reason") == "abstain_unknown_tool"
+
+
+def test_repair_sets_reason_header(compat_client):
+    """A successful repair exposes its reason code on the response header."""
+    upstream = _upstream_response('{"name": "write_file", "arguments": {"path": "a.py"}}')
+    with patch.object(srv.CLIENT, "post", new_callable=AsyncMock, return_value=upstream):
+        resp = _post_with_full_tools(compat_client, [_WRITE_FILE_REQUIRED_PATH])
+
+    assert resp.status_code == 200
+    assert len(_tool_calls_of(resp)) == 1
+    assert resp.headers.get("x-local-tool-proxy-reason") == "repaired_json_content"
+
+
+def test_abstention_records_reason_in_trace(compat_client, tmp_path):
+    """An abstention emits a sanitized `abstain` trace event with its reason."""
+    trace_file = tmp_path / "trace.jsonl"
+    srv.TRACE_FILE = trace_file
+
+    upstream = _upstream_response('{"name": "write_file", "arguments": {}}')
+    with patch.object(srv.CLIENT, "post", new_callable=AsyncMock, return_value=upstream):
+        resp = _post_with_full_tools(compat_client, [_WRITE_FILE_REQUIRED_PATH])
+
+    assert resp.status_code == 200
+    events = [json.loads(line) for line in trace_file.read_text().splitlines() if line.strip()]
+    abstain_events = [e for e in events if e["event"] == "abstain"]
+    assert len(abstain_events) == 1
+    assert abstain_events[0]["reason"] == "abstain_missing_required_args"

@@ -19,7 +19,53 @@ function_call variants and reasoning_content stripping.
 import json
 import re
 
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
+
+
+# === Reason codes ==========================================================
+#
+# Every repair/abstention decision is labelled with exactly one of these stable
+# string codes. They are the contract the proxy exposes about *why* it did or
+# did not turn model output into tool_calls. They are intentionally narrow and
+# deterministic so tests can pin them and diagnostics can be scrutinized.
+#
+# Repair codes (the proxy emitted tool_calls):
+REASON_VALID_NATIVE = "valid_native_tool_call"          # upstream already returned tool_calls
+REASON_REPAIRED_JSON = "repaired_json_content"          # bare JSON object/array in content
+REASON_REPAIRED_MARKDOWN = "repaired_markdown_json"     # ```json fenced block in content
+REASON_REPAIRED_XML = "repaired_xml_tool_block"         # <tool_code>/<execute_tool>/<tool> block
+REASON_REPAIRED_TOOLNAME = "repaired_toolname_snippet"  # toolName{...} / toolName({...}) snippet
+REASON_REPAIRED_LEGACY_FUNCTION_CALL = "repaired_legacy_function_call"  # legacy function_call field
+#
+# Abstention codes (the proxy deliberately did NOT emit tool_calls):
+REASON_ABSTAIN_NO_TOOL_INTENT = "abstain_no_tool_intent"                  # prose, no tool structure
+REASON_ABSTAIN_MISSING_REQUIRED_ARGS = "abstain_missing_required_args"    # required arg absent
+REASON_ABSTAIN_INVALID_ARGUMENTS = "abstain_invalid_arguments"           # required arg empty/null
+REASON_ABSTAIN_UNKNOWN_TOOL = "abstain_unknown_tool"                      # name not in declared tools
+REASON_ABSTAIN_AMBIGUOUS_MULTIPLE_TOOLS = "abstain_ambiguous_multiple_tools"  # >1 tool, no clear call
+REASON_ABSTAIN_MALFORMED_UNRECOVERABLE_JSON = "abstain_malformed_unrecoverable_json"  # tool-ish, unparseable
+#
+# Pass-through code (nothing to repair, nothing to abstain from):
+REASON_PASS_THROUGH_NO_TOOLS_DECLARED = "pass_through_no_tools_declared"  # request declared no tools
+
+REPAIR_REASONS = frozenset({
+    REASON_VALID_NATIVE,
+    REASON_REPAIRED_JSON,
+    REASON_REPAIRED_MARKDOWN,
+    REASON_REPAIRED_XML,
+    REASON_REPAIRED_TOOLNAME,
+    REASON_REPAIRED_LEGACY_FUNCTION_CALL,
+})
+
+ABSTAIN_REASONS = frozenset({
+    REASON_ABSTAIN_NO_TOOL_INTENT,
+    REASON_ABSTAIN_MISSING_REQUIRED_ARGS,
+    REASON_ABSTAIN_INVALID_ARGUMENTS,
+    REASON_ABSTAIN_UNKNOWN_TOOL,
+    REASON_ABSTAIN_AMBIGUOUS_MULTIPLE_TOOLS,
+    REASON_ABSTAIN_MALFORMED_UNRECOVERABLE_JSON,
+})
 
 
 def extract_known_tool_names(request_payload: dict) -> list[str]:
@@ -299,6 +345,198 @@ def parse_tool_call_from_content(
         return xml_calls
 
     return None
+
+
+# === Schema-aware repair decision layer ===================================
+#
+# parse_tool_call_from_content() is deliberately permissive: it recovers
+# structure. The decision layer below adds the conservative half — it validates
+# recovered calls against the *declared* tool schema and refuses to fabricate a
+# call the model did not clearly and completely express. Each decision carries a
+# stable reason code (see the constants above).
+
+
+@dataclass
+class RepairDecision:
+    """Outcome of inspecting one assistant message for tool intent.
+
+    `tool_calls` is non-empty only when the proxy decided to emit a repaired (or
+    pass-through native) tool call. On any abstention it is empty and `reason`
+    explains why no call was produced.
+    """
+
+    reason: str
+    tool_calls: List[Dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def repaired(self) -> bool:
+        """True when the decision results in emitted tool_calls."""
+        return bool(self.tool_calls)
+
+
+def _required_args_for(tools: Optional[list], name: str) -> Optional[List[str]]:
+    """Return the declared required-arg names for `name`, or None if the tool
+    is not declared in this request. An empty list means the tool exists but
+    requires no arguments."""
+    for t in tools or []:
+        fn = t.get("function") or t
+        if fn.get("name") == name:
+            params = fn.get("parameters") or {}
+            required = params.get("required") or []
+            return [r for r in required if isinstance(r, str)]
+    return None
+
+
+def _loads_args(arguments: Any) -> Dict[str, Any]:
+    """Coerce a tool call's `arguments` (string or dict) into a dict."""
+    if isinstance(arguments, dict):
+        return arguments
+    try:
+        parsed = json.loads(arguments)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _is_empty_arg_value(value: Any) -> bool:
+    """A required argument is 'invalid' when present but clearly carries no
+    value: None, empty/whitespace string, or empty list/dict. Note that 0 and
+    False are valid values and are NOT treated as empty."""
+    if value is None:
+        return True
+    if isinstance(value, str) and not value.strip():
+        return True
+    if isinstance(value, (list, dict)) and len(value) == 0:
+        return True
+    return False
+
+
+def _validate_calls(calls: List[Dict[str, Any]], tools: Optional[list]) -> Optional[str]:
+    """Validate recovered calls against the declared schema.
+
+    Returns an abstention reason code if any call is unsafe to emit, else None.
+    """
+    for call in calls:
+        name = call.get("function", {}).get("name")
+        required = _required_args_for(tools, name)
+        if required is None:
+            return REASON_ABSTAIN_UNKNOWN_TOOL
+        args = _loads_args(call.get("function", {}).get("arguments"))
+        if any(r not in args for r in required):
+            return REASON_ABSTAIN_MISSING_REQUIRED_ARGS
+        if any(_is_empty_arg_value(args.get(r)) for r in required):
+            return REASON_ABSTAIN_INVALID_ARGUMENTS
+    return None
+
+
+_XML_TOOL_TAG = re.compile(
+    r"<\s*(tool_code|execute_tool|tool|tool_use|run_terminal_cmd|write_file|git_commit)\b",
+    re.IGNORECASE,
+)
+
+
+def _classify_repair_kind(text: str) -> str:
+    """Infer which malformed shape was repaired, for an honest reason code."""
+    t = text.strip()
+    if _XML_TOOL_TAG.search(t):
+        return REASON_REPAIRED_XML
+    if "```" in t:
+        return REASON_REPAIRED_MARKDOWN
+    if t[:1] in "{[":
+        return REASON_REPAIRED_JSON
+    return REASON_REPAIRED_TOOLNAME
+
+
+def _distinct_known_names_in(text: str, known_names: List[str]) -> set:
+    """Distinct declared tool names that appear as whole words in `text`."""
+    found = set()
+    for name in known_names:
+        if re.search(r"\b" + re.escape(name) + r"\b", text):
+            found.add(name)
+    return found
+
+
+def _call_from_legacy_function_call(function_call: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert a legacy OpenAI `function_call` field into a tool_calls entry."""
+    name = function_call.get("name") or ""
+    raw_args = function_call.get("arguments")
+    if isinstance(raw_args, dict):
+        arguments = json.dumps(raw_args)
+    elif isinstance(raw_args, str):
+        arguments = raw_args
+    else:
+        arguments = "{}"
+    return {
+        "id": f"call_0_{name[:8]}",
+        "type": "function",
+        "function": {"name": name, "arguments": arguments},
+    }
+
+
+def decide_repair(content: str, tools: Optional[list] = None) -> RepairDecision:
+    """Decide whether/how to repair tool intent found in assistant `content`.
+
+    `tools` is the OpenAI-style tools list from the request (full specs, used
+    for schema-aware validation). This is the conservative core: it only emits
+    tool_calls when a complete, schema-valid call can be recovered.
+    """
+    tools = tools or []
+    if not tools:
+        # With no declared tools we have nothing to validate against, so we
+        # never fabricate a call from content.
+        return RepairDecision(REASON_PASS_THROUGH_NO_TOOLS_DECLARED)
+
+    known_names = extract_known_tool_names({"tools": tools})
+    text = (content or "").strip()
+
+    # No tool-ish structure at all -> the model expressed no tool intent.
+    if not text or not looks_like_tool_call_json(text):
+        return RepairDecision(REASON_ABSTAIN_NO_TOOL_INTENT)
+
+    calls = parse_tool_call_from_content(text, known_names or None)
+
+    if not calls:
+        # Looked tool-ish but we could not recover a call. If several declared
+        # tools are named without one clear invocation, treat it as ambiguous;
+        # otherwise the structure is simply too malformed to recover safely.
+        if len(_distinct_known_names_in(text, known_names)) >= 2:
+            return RepairDecision(REASON_ABSTAIN_AMBIGUOUS_MULTIPLE_TOOLS)
+        return RepairDecision(REASON_ABSTAIN_MALFORMED_UNRECOVERABLE_JSON)
+
+    bad = _validate_calls(calls, tools)
+    if bad:
+        return RepairDecision(bad)
+
+    return RepairDecision(_classify_repair_kind(text), calls)
+
+
+def decide_message_repair(message: Dict[str, Any], tools: Optional[list] = None) -> RepairDecision:
+    """Top-level decision for a full upstream assistant message.
+
+    Handles native tool_calls and legacy function_call before falling back to
+    content repair, so the server has a single entry point and one reason code.
+    """
+    message = message or {}
+    if not tools:
+        return RepairDecision(REASON_PASS_THROUGH_NO_TOOLS_DECLARED)
+
+    # 1. Upstream already returned valid tool_calls — pass through unchanged.
+    native = message.get("tool_calls")
+    if native:
+        return RepairDecision(REASON_VALID_NATIVE, list(native))
+
+    # 2. Legacy OpenAI function_call field — convert, then validate like any
+    #    recovered call so a missing required arg still abstains.
+    function_call = message.get("function_call")
+    if isinstance(function_call, dict) and function_call.get("name"):
+        calls = [_call_from_legacy_function_call(function_call)]
+        bad = _validate_calls(calls, tools)
+        if bad:
+            return RepairDecision(bad)
+        return RepairDecision(REASON_REPAIRED_LEGACY_FUNCTION_CALL, calls)
+
+    # 3. Content repair (the common small-model failure mode).
+    return decide_repair(message.get("content") or "", tools)
 
 
 def synthesize_tool_call_response(
