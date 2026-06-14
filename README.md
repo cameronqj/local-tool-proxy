@@ -84,6 +84,19 @@ curl http://localhost:9000/health
 curl http://localhost:9000/v1/models
 ```
 
+## Demo (no Ollama required)
+
+Want to see the repair happen without installing a model? Run the self-contained
+demo. It starts a mock "local model" that emits the broken tool-call shapes small
+models produce, puts the proxy in front of it, and shows the before/after for each:
+
+```bash
+make demo
+# or: python3 demo.py
+```
+
+Everything runs in-process on localhost — no GPU, no model download.
+
 ## Minimal SDK Example
 
 Any client that accepts an OpenAI-compatible base URL can point at the proxy. For
