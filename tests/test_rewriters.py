@@ -76,3 +76,17 @@ def test_realistic_fixture_outputs_parse():
 def test_prose_fixture_does_not_parse_as_tool_call():
     text = (FIXTURE_DIR / "prose_false_positive.txt").read_text()
     assert parse_tool_call_from_content(text, ["write_file"]) is None
+
+
+def test_valid_json_with_colon_and_apostrophe_values_is_not_corrupted():
+    """Regression: repair_jsonish must not run on already-valid JSON. A URL
+    (embedded ':') or an apostrophe in a value previously broke parsing, so the
+    recoverable call was silently dropped."""
+    url_call = '{"name": "fetch", "arguments": {"url": "http://example.com:8080/a"}}'
+    calls = parse_tool_call_from_content(url_call, ["fetch"])
+    assert calls and calls[0]["function"]["name"] == "fetch"
+    assert json.loads(calls[0]["function"]["arguments"])["url"] == "http://example.com:8080/a"
+
+    apos_call = '{"name": "write_file", "arguments": {"path": "a.py", "content": "it' + chr(39) + 's ok"}}'
+    calls = parse_tool_call_from_content(apos_call, ["write_file"])
+    assert calls and json.loads(calls[0]["function"]["arguments"])["content"] == "it's ok"

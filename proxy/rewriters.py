@@ -128,8 +128,9 @@ def _parse_xml_tool_call(text: str) -> Optional[Dict[str, Any]]:
 
             # Try to parse as JSON first (handles the good cases)
             if args_str.startswith('{'):
-                try:
-                    args = json.loads(repair_jsonish(args_str))
+                parsed = _loads_jsonish(args_str)
+                if isinstance(parsed, dict):
+                    args = parsed
                     return {
                         "id": f"call_{name[:8]}",
                         "type": "function",
@@ -138,8 +139,6 @@ def _parse_xml_tool_call(text: str) -> Optional[Dict[str, Any]]:
                             "arguments": json.dumps(args),
                         }
                     }
-                except Exception:
-                    pass
 
             # Fallback: treat as a single positional string argument (common in creative output)
             # e.g. <tool_code>run_command("mkdir foo")</tool_code>
@@ -218,16 +217,42 @@ def repair_jsonish(text: str, repairs: list[str] | None = None) -> str:
     return cleaned
 
 
+def _loads_jsonish(text: str) -> Any:
+    """Parse a JSON blob, preferring the *least* destructive interpretation.
+
+    Tries strict JSON first, then fence-stripped JSON, and only as a last resort
+    the regex-repaired form. This ordering matters: ``repair_jsonish`` rewrites
+    ``:`` and ``'`` and would corrupt already-valid values such as URLs
+    (``http://...``) or apostrophes, so it must never run on input that already
+    parses cleanly. Returns the parsed value, or ``None`` if nothing parses.
+    """
+    stripped = (text or "").strip()
+    candidates = [stripped]
+    fenced = re.sub(
+        r'^```(?:json)?\s*|\s*```$', '', stripped, flags=re.IGNORECASE | re.DOTALL
+    ).strip()
+    if fenced and fenced != stripped:
+        candidates.append(fenced)
+    candidates.append(repair_jsonish(text))
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            return json.loads(candidate)
+        except Exception:
+            continue
+    return None
+
+
 def parse_json_content(text: str, known_tool_names: list[str] | None = None) -> list[dict]:
     """Parse JSON or JSON-like tool calls from content."""
     if not text or not looks_like_tool_call_json(text):
         return []
 
-    cleaned = repair_jsonish(text)
     calls = []
+    data = _loads_jsonish(text)
 
-    try:
-        data = json.loads(cleaned)
+    if data is not None:
 
         # Unwrap common tool call wrappers: {"tool_calls": [...] } or {"tool_call": [...]}
         if isinstance(data, dict):
@@ -279,7 +304,7 @@ def parse_json_content(text: str, known_tool_names: list[str] | None = None) -> 
                     "arguments": json.dumps(args) if isinstance(args, (dict, list)) else str(args),
                 }
             })
-    except Exception:
+    else:
         # Try the ToolBridge-style name{json} fallback
         for name in (known_tool_names or []):
             pattern = re.compile(re.escape(name) + r'\s*(?:\(\s*)?(\{)', re.IGNORECASE)
@@ -292,16 +317,14 @@ def parse_json_content(text: str, known_tool_names: list[str] | None = None) -> 
             json_str = _extract_balanced_json(text, brace_idx)
             if not json_str:
                 continue
-            try:
-                args = json.loads(repair_jsonish(json_str))
+            args = _loads_jsonish(json_str)
+            if isinstance(args, (dict, list)):
                 calls.append({
                     "id": f"call_{len(calls)}_{name[:8]}",
                     "type": "function",
                     "function": {"name": name, "arguments": json.dumps(args)},
                 })
                 break
-            except Exception:
-                continue
 
     return calls
 

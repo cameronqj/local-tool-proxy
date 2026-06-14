@@ -236,3 +236,17 @@ def test_abstention_records_reason_in_trace(compat_client, tmp_path):
     abstain_events = [e for e in events if e["event"] == "abstain"]
     assert len(abstain_events) == 1
     assert abstain_events[0]["reason"] == "abstain_missing_required_args"
+
+
+def test_repaired_response_reports_tool_calls_finish_reason(compat_client):
+    """A response carrying repaired tool_calls must report finish_reason
+    'tool_calls' (not the upstream 'stop') or strict OpenAI clients will not
+    execute the recovered call."""
+    upstream = _upstream_response('{"name": "write_file", "arguments": {"path": "a.py"}}')
+    with patch.object(srv.CLIENT, "post", new_callable=AsyncMock, return_value=upstream):
+        resp = _post_with_full_tools(compat_client, [_WRITE_FILE_REQUIRED_PATH])
+
+    choice = resp.json()["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    assert choice["message"]["content"] is None
+    assert len(_tool_calls_of(resp)) == 1
