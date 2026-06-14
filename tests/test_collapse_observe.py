@@ -1,22 +1,20 @@
-"""
-Observe-mode collapse classification test.
+"""Observe-mode collapse classification tests.
 
-Simulates sequences of tool-using turns (including the exact collapse patterns
-seen in real opencode + gemma4:e4b-mlx runs from May 2026) and verifies:
-- correct collapse classification
-- drift score updates
-- report generation
+Exercises the collapse classifier and drift accounting against the exact
+sequences seen in real opencode + gemma4:e4b-mlx runs (May 2026), plus the
+log-scanning report generator. These are real `assert`-based pytest tests (the
+file was previously a `print`/`main()` script that pytest collected as zero
+tests).
 """
 
-import sys
-sys.path.insert(0, ".")
+import pytest
 
 import proxy.server as srv
 from proxy.collapse import classify_from_openai_response, get_collapse_signals
 from proxy.collapse_report import parse_log_lines, format_report
 
 
-def simulate_turn(trace: str, response: dict, had_tools: bool = True):
+def _simulate_turn(trace: str, response: dict, had_tools: bool = True):
     cat = classify_from_openai_response(response, had_tools_in_request=had_tools)
     signals = get_collapse_signals(cat, had_tools)
 
@@ -29,63 +27,62 @@ def simulate_turn(trace: str, response: dict, had_tools: bool = True):
         state["tool_streak"] = 0
         state["turns_since_last_tool"] += 1
         state["collapse_events"] += 1
-
-    drift = {
-        "tool_streak": state["tool_streak"],
-        "turns_since_last_tool": state["turns_since_last_tool"],
-        "total_tool_turns": state["total_tool_turns"],
-        "collapse_events": state["collapse_events"],
-    }
-
-    return cat, signals, drift
+    return cat, signals, dict(state)
 
 
-def main():
-    print("=== Phase 1 Observe Mode Evaluation ===\n")
-
-    srv.MODE = "observe"
+@pytest.fixture(autouse=True)
+def _clean_drift_state():
+    srv.TRACE_DRIFT.clear()
+    yield
     srv.TRACE_DRIFT.clear()
 
-    # Simulate the rigid tictactoe collapse pattern (very common in our real runs)
-    rigid_sequence = [
-        ("rigid-1", {"choices": [{"message": {"tool_calls": [{}]}, "finish_reason": "tool_calls"}]}),
-        ("rigid-2", {"choices": [{"message": {"content": "1. mkdir tictactoe\n2. git init"}, "finish_reason": "stop"}]}),
-        ("rigid-3", {"choices": [{"message": {"content": "Next I will create the FastAPI backend."}, "finish_reason": "stop"}]}),
+
+def _tool_turn():
+    return {"choices": [{"message": {"tool_calls": [{}]}, "finish_reason": "tool_calls"}]}
+
+
+def _content_turn(content):
+    return {"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}
+
+
+def test_rigid_prompt_collapse_sequence_is_classified():
+    """Matches the May 2026 real opencode run: one tool turn, then the model
+    drifts into literal commands and then tool-intent prose."""
+    cat1, _, drift1 = _simulate_turn("rigid-1", _tool_turn())
+    assert cat1 == "tool_calls"
+    assert drift1["tool_streak"] == 1
+
+    cat2, sig2, drift2 = _simulate_turn("rigid-2", _content_turn("1. mkdir tictactoe\n2. git init"))
+    assert cat2 == "literal_commands"
+    assert sig2 == ["model_printed_literal_commands"]
+    assert drift2["tool_streak"] == 0 and drift2["collapse_events"] == 1
+
+    cat3, sig3, _ = _simulate_turn("rigid-3", _content_turn("Next I will create the FastAPI backend."))
+    assert cat3 == "tool_intent_prose"
+    assert sig3 == ["model_described_action_without_calling_tool"]
+
+
+def test_tasklite_sequence_survives_longer_then_drifts():
+    cats = [
+        _simulate_turn("tasklite-1", _tool_turn())[0],
+        _simulate_turn("tasklite-2", _tool_turn())[0],
+        _simulate_turn("tasklite-3", _content_turn("I will now write the test file."))[0],
     ]
+    assert cats == ["tool_calls", "tool_calls", "tool_intent_prose"]
+    assert srv.TRACE_DRIFT["tasklite-2"]["tool_streak"] == 1
 
-    print("--- Rigid prompt simulation (matches May 2026 real opencode run) ---")
-    for name, resp in rigid_sequence:
-        cat, signals, drift = simulate_turn(name, resp)
-        print(f"{name}: category={cat} signals={signals}")
-        print(f"        drift={drift}\n")
 
-    # Simulate the "realistic" tasklite pattern (slightly better survival)
-    tasklite_sequence = [
-        ("tasklite-1", {"choices": [{"message": {"tool_calls": [{}]}, "finish_reason": "tool_calls"}]}),
-        ("tasklite-2", {"choices": [{"message": {"tool_calls": [{}]}, "finish_reason": "tool_calls"}]}),
-        ("tasklite-3", {"choices": [{"message": {"content": "I will now write the test file."}, "finish_reason": "stop"}]}),
-    ]
-
-    print("--- Tasklite (realistic bugfix) simulation ---")
-    for name, resp in tasklite_sequence:
-        cat, signals, drift = simulate_turn(name, resp)
-        print(f"{name}: category={cat} signals={signals}")
-        print(f"        drift={drift}\n")
-
-    # Generate report from the simulated log lines
-    sample_log_lines = [
+def test_collapse_report_aggregates_log_lines():
+    log_lines = [
         "[ltp-rigid-2] collapse: category=literal_commands signals=['model_printed_literal_commands']",
         "[ltp-rigid-3] collapse: category=tool_intent_prose signals=['model_described_action_without_calling_tool']",
         "[ltp-tasklite-3] collapse: category=tool_intent_prose signals=['model_described_action_without_calling_tool']",
     ]
+    data = parse_log_lines(log_lines)
+    assert data["total_traces"] == 3
+    assert data["category_counts"]["tool_intent_prose"] == 2
+    assert data["category_counts"]["literal_commands"] == 1
 
-    print("--- Collapse Report (as would be produced in Phase 1 evaluation) ---")
-    report_data = parse_log_lines(sample_log_lines)
-    print(format_report(report_data))
-
-    print("\nPhase 1 observe mode evaluation complete.")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    report = format_report(data)
+    assert "Collapse Report" in report
+    assert "tool_intent_prose" in report
