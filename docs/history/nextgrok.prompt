@@ -1,5 +1,8 @@
 # nextgrok.prompt
 
+Historical design prompt. This file is kept for project archaeology and should
+not be treated as current user-facing documentation.
+
 **Working title:** NextGrok  
 **Focus:** Moving beyond pure wire-format repair into explicit stabilization and lightweight planning for small local models in real agent harnesses.
 

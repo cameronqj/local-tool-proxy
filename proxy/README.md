@@ -77,9 +77,9 @@ Then run OpenCode with `-m local-proxy/gemma4:e4b-mlx` (or equivalent) and give 
 - OpenCode PR #16531 (unmerged as of May 2026): The `toolParser` compat layer inside OpenCode. This proxy can be seen as an external version of the same idea that works for *any* harness.
 - SmallHarness: Excellent client-side JSON/XML fallback parsers. We are stealing the best detection heuristics and moving them server-side into the proxy.
 
-## NextGrok Modes (Stabilize + Planner)
+## Experimental Modes (Stabilize + Planner)
 
-As of the NextGrok work, the proxy supports three explicit modes via `--mode`:
+The proxy supports three explicit modes via `--mode`:
 
 - `compat` (default): Pure wire-format repair only. No behavior change. Recommended for normal use.
 - `observe`: Same as compat + rich diagnostics for "Agent Loop Collapse" (when the model stops using tools and falls back to literal text/prose). Adds per-trace drift scoring.
@@ -102,7 +102,7 @@ python3 -m proxy.server \
 **Important safety & usage notes:**
 - `stabilize` and `planner` are **explicitly opt-in** behind CLI flags. They are off by default.
 - They only affect requests for models listed in `--compat-models`.
-- Every intervention is logged with the `x-gptfixes-trace-id` and clearly marked (e.g. `STABILIZE ATTEMPT`, `planner_soft_hint_used`).
+- Every intervention is logged with `x-local-tool-proxy-trace-id` and clearly marked (e.g. `STABILIZE ATTEMPT`, `planner_soft_hint_used`). The legacy `x-gptfixes-trace-id` header is also emitted for now.
 - You can always reproduce any run with stabilization completely disabled by using `--mode compat`.
 - These features change model behavior (they add internal steering messages on retries). Treat them as experimental middleware.
 
@@ -120,7 +120,7 @@ python3 -m proxy.server \
 
 Then point stock OpenCode at `http://localhost:9000/v1` using the `small-local` provider (see `examples/opencode-for-proxy.json`).
 
-See `nextgrok.prompt` in the repo root for the full design rationale and constraints.
+Historical design prompts live in `docs/history/`.
 
 ## Next Steps (for this repo)
 

@@ -37,7 +37,9 @@ env/
 .coverage
 htmlcov/
 .pytest_cache/
+.ruff_cache/
 .tox/
+.tmp_pycache/
 
 # OS
 .DS_Store
@@ -48,3 +50,8 @@ Thumbs.db
 *.log
 trace-*.json
 tictactoe/
+opencode.json.bak.*
+local_tool_proxy.egg-info/
+eval/logs/
+eval/results/*.json
+eval/results/*.txt

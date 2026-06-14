@@ -1,5 +1,8 @@
 # gptfixes.prompt
 
+Historical design prompt. This file is kept for project archaeology and should
+not be treated as current user-facing documentation.
+
 You are implementing `gptfixes`, a lightweight open-source OpenAI-compatible proxy
 that sits in front of Ollama and improves local-model tool-calling reliability.
 
@@ -540,4 +543,3 @@ Avoid until there is real user demand:
 - The proxy has deterministic tests proving the transformations.
 - Failures are observable and classifiable.
 - Default behavior is transparent except for documented compatibility repair.
-

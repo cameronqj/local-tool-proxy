@@ -3,7 +3,7 @@ proxy/collapse.py
 
 Pure classifier for assistant responses in tool-using conversations.
 
-Part of NextGrok instrumentation (Phase 0).
+Part of local-tool-proxy observe/stabilize instrumentation.
 
 Classifies why a model stopped using tools (or didn't) so we can
 detect "Agent Loop Collapse" vs. legitimate final answers.

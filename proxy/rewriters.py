@@ -273,7 +273,7 @@ def parse_tool_call_from_content(
     known_tool_names: list[str] | None = None,
 ) -> list[dict] | None:
     """
-    Best-effort extraction using a clear strategy list (Phase 2 architecture per gptfixes.prompt).
+    Best-effort extraction using a clear strategy list from the historical design notes.
 
     Strategy order:
     1. JSON content (including name{json} fallback when known names are provided)

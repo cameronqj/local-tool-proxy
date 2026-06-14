@@ -1,7 +1,7 @@
 """
 proxy/stabilizer.py
 
-Active stabilization logic for NextGrok.
+Active stabilization logic for local-tool-proxy.
 
 This module has evolved beyond the original conservative v1 design based on real
 rigid-prompt data. The retry is now significantly stronger for known failure modes

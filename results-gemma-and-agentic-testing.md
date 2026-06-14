@@ -247,4 +247,45 @@ Multiple real runs of the in-line proxy were executed in this session:
 
 The proxy is now in excellent shape for the real test on your hardware with stock OpenCode + actual `gemma4:e4b-mlx`.
 
+---
+
+## 12B QAT (Unsloth) + MTP Drafter Direct Benchmarks (2026-06-12)
+
+Hardware: same 24 GB fanless M4 Air. Used the newly downloaded local files:
+- ~/models/gemma4-12b-qat/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf (6.3 GB)
+- ~/models/gemma4-12b-qat/mtp-gemma-4-12B-it.gguf (242 MB drafter)
+- Custom build at ~/llama.cpp-mtp (with draft-mtp support)
+
+**Key command pattern (S prompt for apples-to-apples with prior E4B QAT):**
+```
+./build/bin/llama-cli \
+  --model .../gemma-4-12B-it-qat-UD-Q4_K_XL.gguf \
+  --model-draft .../mtp-gemma-4-12B-it.gguf \
+  --spec-type draft-mtp --spec-draft-n-max 2 \
+  --no-conversation --single-turn --reasoning off \
+  --temp 0 --top-p 0.95 --top-k 64 \
+  -c 4096 -ngl 48 -ngld 999 \
+  -p 'Explain the key differences between synchronous and asynchronous I/O ...' \
+  -n 300 --no-display-prompt
+```
+
+The prior OOM ("command buffer ... kIOGPUCommandBufferCallbackErrorOutOfMemory") was triggered by chat/thinking/REPL mode + full MTP drafter load (extra ctx_other + draft KV + verify). The flags above + clean state let full offload (ngl 48 + ngld) succeed.
+
+### Results via updated benchmark.py (direct mode, same S/M/L prompts)
+
+| Variant                        | Path          | S decode (tok/s) | M decode (tok/s) | L decode (tok/s) | Notes |
+|--------------------------------|---------------|------------------|------------------|------------------|-------|
+| gemma4:12b-qat-mtp (direct)   | local GGUF + MTP build | 13.7            | 15.1            | 14.4 (n=200)    | Full GPU offload + drafter. ~15 t/s class. Fastest of the 12B QAT set. |
+| gemma4:12b-qat (direct)       | local GGUF (no MTP)    | 7.9             | 7.0             | 6.7 (n=200)     | Same weights. Slower in this run (thermal/order variance likely; MTP run preceded it). |
+| gemma4:12b-it-qat (Ollama)    | ollama tag (5d old)    | 6.9             | 6.5             | 9.8             | Via /api/generate. Positive counts (earlier "0 tokens" reports were likely empty response text from thinking mode or load state). |
+| hf.co/...12B-it-qat-GGUF (Ollama) | recent pull (UD-Q4_K_XL) | 12.2*          | 11.9            | 10.8            | *S only produced 190/300 requested tokens before stop. Best Ollama-path 12B QAT numbers. |
+
+Prefill on direct was strong (46–113+ tok/s depending on prompt length). ctx capped at 4096 for these direct runs (full 32k would OOM on KV with the drafter).
+
+**Comparison context**: E4B QAT MLX variants previously hit ~26 t/s decode (smaller model, MLX path, no MTP). The 12B QAT (~2x params) lands at roughly half speed here, as expected. The MTP drafter did not hurt (and in this pair of runs appeared neutral-to-positive) while adding the speculative path.
+
+**Takeaway for this hardware**: 12B QAT MTP is usable with the custom build + full offload when using the non-conversation/single-turn/reasoning flags (and -c 4k). Gives a real ~14 t/s decode number on S/M workloads. For daily driver the E4B-mlx remains snappier; use 12B QAT when you specifically want the larger QAT or the MTP drafter behavior.
+
+Also updated `benchmark.py` with first-class support for the direct keys (`gemma4:12b-qat-mtp`, `gemma4:12b-qat`) so future S/M/L runs are one-liner reproducible.
+
 See `proxy/TESTING.md` for the exact commands to run the final verification with real inference.

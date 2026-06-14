@@ -99,6 +99,9 @@ STABILIZE_MAX_RETRIES: int = 1
 PLANNER_MODE: str = "disabled"  # disabled | observe | soft   (only active with stabilize)
 CLIENT = httpx.AsyncClient(timeout=600.0)  # long timeout for generation
 
+# Diagnostic flag (gated raw model output logging)
+DEBUG_LOG_MODEL_OUTPUTS: bool = False
+
 # Simple in-memory per-trace state for drift scoring (Phase 1 Observe)
 # Keyed by trace_id. Reset on process restart. Good enough for single-run evaluation.
 from collections import defaultdict
@@ -121,7 +124,7 @@ async def lifespan(app: FastAPI):
         logger.info(f"  stabilize_max_retries: {STABILIZE_MAX_RETRIES}")
         logger.info(f"  planner: {PLANNER_MODE}")
         logger.warning("  *** stabilize mode is EXPERIMENTAL and will add internal steering messages on retries ***")
-        logger.warning("  *** To disable all NextGrok behavior: use --mode compat ***")
+        logger.warning("  *** To disable stabilize behavior: use --mode compat ***")
     logger.info("  Goal: Make stock OpenCode (and similar harnesses) work with small local models")
     logger.info("  via clean in-line translation of tool calling output.")
     yield
@@ -137,6 +140,50 @@ def is_compat_model(model: str) -> bool:
         return False
     model = model.lower()
     return any(m in model for m in COMPAT_MODELS)
+
+
+def _log_harness_request(payload: dict, trace_id: Optional[str] = None):
+    """Gated diagnostic dump of what the harness (OpenCode) actually sent."""
+    if not DEBUG_LOG_MODEL_OUTPUTS:
+        return
+
+    prefix = f"[{trace_id}] " if trace_id else ""
+    try:
+        messages = payload.get("messages", [])
+        tools = payload.get("tools", [])
+        tool_choice = payload.get("tool_choice")
+        model_name = payload.get("model")
+        temperature = payload.get("temperature")
+        max_tokens = payload.get("max_tokens") or payload.get("max_completion_tokens")
+
+        logger.warning(f"{prefix}HARNESS_REQUEST: model={model_name} tool_choice={tool_choice} "
+                       f"temp={temperature} max_tokens={max_tokens} num_messages={len(messages)} num_tools={len(tools)}")
+
+        # Log roles + short preview of content
+        for i, m in enumerate(messages):
+            role = m.get("role")
+            content = m.get("content")
+            preview = ""
+            if isinstance(content, str):
+                preview = repr(content[:180] + "..." if len(content) > 180 else content)
+            elif isinstance(content, list):
+                preview = f"[multipart content, {len(content)} parts]"
+            logger.info(f"{prefix}  msg[{i}] role={role} content={preview}")
+
+        # Log tool names/schemas at high level (not full giant schemas)
+        if tools:
+            tool_names = []
+            for t in tools:
+                fn = t.get("function") or t
+                name = fn.get("name", "unnamed")
+                tool_names.append(name)
+            logger.info(f"{prefix}  tools: {tool_names}")
+
+        if tool_choice:
+            logger.info(f"{prefix}  tool_choice: {tool_choice}")
+
+    except Exception as e:
+        logger.warning(f"Failed to log harness request: {e}")
 
 
 async def _forward_request(request: Request, path: str):
@@ -248,7 +295,7 @@ async def list_models():
 @app.get("/health")
 @app.get("/v1/health")
 async def health():
-    """Health + NextGrok status (Phase 1+)."""
+    """Health and mode status."""
     return {
         "status": "ok",
         "upstream": OLLAMA_BASE,
@@ -306,6 +353,7 @@ async def chat_completions(request: Request):
     body = await request.body()
 
     model = None
+    payload = {}
     try:
         payload = json.loads(body)
         model = payload.get("model")
@@ -314,6 +362,13 @@ async def chat_completions(request: Request):
 
     compat = is_compat_model(model) if model else False
     has_tools = _has_tools(body)
+
+    # === Gated diagnostic logging of the actual request from the harness ===
+    if DEBUG_LOG_MODEL_OUTPUTS:
+        try:
+            _log_harness_request(payload, trace_id=None)  # trace_id not yet assigned
+        except Exception:
+            pass
 
     if compat and has_tools:
         return await _handle_tool_request_for_compat_model(request, model, body)
@@ -346,7 +401,7 @@ async def _handle_tool_request_for_compat_model(
     # Detect rigid/structured prompts for better diagnostics and future format enforcement
     is_rigid = False
     first_user_message = ""
-    tool_names: List[str] = []
+    tool_names: list[str] = []
     try:
         payload_for_detection = json.loads(original_body)
         messages = payload_for_detection.get("messages", [])
@@ -367,8 +422,15 @@ async def _handle_tool_request_for_compat_model(
     except Exception:
         pass
 
-    trace_id = f"gptfixes-{uuid.uuid4().hex[:12]}"
+    trace_id = f"ltp-{uuid.uuid4().hex[:12]}"
     logger.info(f"[{trace_id}] COMPAT TOOL PATH for {model} — forcing non-stream + rewrite attempt (rigid={is_rigid}) mode={MODE}")
+
+    if DEBUG_LOG_MODEL_OUTPUTS:
+        try:
+            payload_for_log = json.loads(original_body)
+            _log_harness_request(payload_for_log, trace_id)
+        except Exception:
+            pass
 
     # Phase 3 improvement: respect per-model preference for forcing non-stream on tool requests
     # (for now we key off the compat model list; later this can come from profiles)
@@ -476,11 +538,26 @@ async def _handle_tool_request_for_compat_model(
 
                 await upstream.aclose()
                 resp = JSONResponse(content=rewritten)
+                resp.headers["x-local-tool-proxy-trace-id"] = trace_id
                 resp.headers["x-gptfixes-trace-id"] = trace_id
                 return resp
 
     # No rewrite happened — return original
     logger.info(f"[{trace_id}] No rewrite needed for {model} (rigid={is_rigid})")
+
+    # === Gated diagnostic: actual model output (only when --debug-log-model-outputs) ===
+    if DEBUG_LOG_MODEL_OUTPUTS:
+        try:
+            msg = data.get("choices", [{}])[0].get("message", {})
+            raw_content = msg.get("content")
+            raw_tool_calls = msg.get("tool_calls")
+            if raw_content or raw_tool_calls:
+                if raw_content:
+                    logger.info(f"[{trace_id}] MODEL_RAW_CONTENT: {repr(raw_content)[:800]}")
+                if raw_tool_calls:
+                    logger.info(f"[{trace_id}] MODEL_RAW_TOOL_CALLS: {raw_tool_calls}")
+        except Exception:
+            pass
 
     # === Phase 1: Observe mode instrumentation ===
     category = "unclear"
@@ -590,6 +667,7 @@ async def _handle_tool_request_for_compat_model(
                             except Exception:
                                 pass
                     resp = JSONResponse(content=retry_data)
+                    resp.headers["x-local-tool-proxy-trace-id"] = trace_id
                     resp.headers["x-gptfixes-trace-id"] = trace_id
                     return resp
                 else:
@@ -602,6 +680,7 @@ async def _handle_tool_request_for_compat_model(
     content = upstream.content
     await upstream.aclose()
     resp = Response(content=content, status_code=upstream.status_code)
+    resp.headers["x-local-tool-proxy-trace-id"] = trace_id
     resp.headers["x-gptfixes-trace-id"] = trace_id
     return resp
 
@@ -611,7 +690,7 @@ async def _handle_tool_request_for_compat_model(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="local-tool-proxy / gptfixes (NextGrok)")
+    parser = argparse.ArgumentParser(description="local-tool-proxy")
     parser.add_argument("--port", type=int, default=9000, help="Port to listen on")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind")
     parser.add_argument("--ollama-base", default="http://localhost:11434/v1",
@@ -619,19 +698,28 @@ def main():
     parser.add_argument("--compat-models", default="gemma4:e4b-mlx,gemma4:e2b-mlx,gpt-oss:20b",
                         help="Comma-separated list of model substrings that get special small-model handling")
     parser.add_argument("--mode", default="compat", choices=["compat", "observe", "stabilize"],
-                        help="NextGrok mode (stabilize and planner are experimental and off by default)")
+                        help="Proxy mode (stabilize and planner are experimental and off by default)")
     parser.add_argument("--stabilize-max-retries", type=int, default=1,
                         help="Max automatic upstream retries in stabilize mode (conservative, default 1)")
     parser.add_argument("--planner", default="disabled", choices=["disabled", "observe", "soft"],
                         help="Planner (only active with --mode stabilize): disabled | observe | soft")
+    parser.add_argument("--debug-log-model-outputs", action="store_true",
+                        help="DANGEROUS: Log full raw model inputs (prompts, tools, messages) and outputs. "
+                             "Only for local debugging. Never use with private/sensitive code. Default: off.")
     args = parser.parse_args()
 
-    global OLLAMA_BASE, COMPAT_MODELS, MODE, STABILIZE_MAX_RETRIES, PLANNER_MODE
+    global OLLAMA_BASE, COMPAT_MODELS, MODE, STABILIZE_MAX_RETRIES, PLANNER_MODE, DEBUG_LOG_MODEL_OUTPUTS
     OLLAMA_BASE = args.ollama_base
     COMPAT_MODELS = {m.strip().lower() for m in args.compat_models.split(",") if m.strip()}
     MODE = args.mode
     STABILIZE_MAX_RETRIES = max(0, args.stabilize_max_retries)
     PLANNER_MODE = args.planner
+    DEBUG_LOG_MODEL_OUTPUTS = args.debug_log_model_outputs
+
+    if DEBUG_LOG_MODEL_OUTPUTS:
+        logger.warning("*** --debug-log-model-outputs is ENABLED ***")
+        logger.warning("*** This will log full prompts, tool schemas, messages, and model outputs. ***")
+        logger.warning("*** DO NOT USE with private or sensitive code. ***")
 
     import uvicorn
     logger.info(f"Starting local-tool-proxy on {args.host}:{args.port}  mode={MODE}")

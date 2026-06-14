@@ -14,12 +14,12 @@ PORT=${PORT:-9000}
 MODELS=${MODELS:-gemma4:e4b-mlx,gemma4:e2b-mlx}
 OLLAMA_BASE=${OLLAMA_BASE:-http://localhost:11434/v1}
 
-echo "🚀 Starting local-tool-proxy for stock OpenCode + small models"
+echo "Starting local-tool-proxy for stock OpenCode + small models"
 echo "   Port:        $PORT"
 echo "   Compat:      $MODELS"
 echo "   Upstream:    $OLLAMA_BASE"
 echo ""
-echo "   NextGrok modes (experimental, opt-in):"
+echo "   Experimental modes (opt-in):"
 echo "     --mode stabilize --planner soft --stabilize-max-retries 1"
 echo ""
 echo "   After it starts, test with:"

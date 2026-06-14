@@ -1,5 +1,5 @@
 """
-Phase 1 evaluation test for NextGrok observe mode.
+Observe-mode collapse classification test.
 
 Simulates sequences of tool-using turns (including the exact collapse patterns
 seen in real opencode + gemma4:e4b-mlx runs from May 2026) and verifies:
@@ -74,9 +74,9 @@ def main():
 
     # Generate report from the simulated log lines
     sample_log_lines = [
-        "[gptfixes-rigid-2] collapse: category=literal_commands signals=['model_printed_literal_commands']",
-        "[gptfixes-rigid-3] collapse: category=tool_intent_prose signals=['model_described_action_without_calling_tool']",
-        "[gptfixes-tasklite-3] collapse: category=tool_intent_prose signals=['model_described_action_without_calling_tool']",
+        "[ltp-rigid-2] collapse: category=literal_commands signals=['model_printed_literal_commands']",
+        "[ltp-rigid-3] collapse: category=tool_intent_prose signals=['model_described_action_without_calling_tool']",
+        "[ltp-tasklite-3] collapse: category=tool_intent_prose signals=['model_described_action_without_calling_tool']",
     ]
 
     print("--- Collapse Report (as would be produced in Phase 1 evaluation) ---")

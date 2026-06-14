@@ -1,5 +1,5 @@
 """
-Phase 2 evaluation test for NextGrok Stabilize v1.
+Stabilize-mode evaluation test.
 
 Uses mocks to simulate:
 - A first upstream response that triggers collapse (tool_intent_prose or literal_commands)

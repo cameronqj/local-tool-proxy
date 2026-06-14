@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "gptfixes"
+name = "local-tool-proxy"
 version = "0.1.0"
 description = "OpenAI-compatible tool-call repair proxy for Ollama and other local models"
 readme = "README.md"
@@ -20,12 +20,21 @@ dependencies = [
     "python-dotenv>=1.0.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "openai>=1.0.0",
+    "pytest>=8.0.0",
+    "ruff>=0.8.0",
+]
+
 [project.scripts]
+local-tool-proxy = "proxy.server:main"
 gptfixes = "proxy.server:main"
 
 [project.urls]
-Homepage = "https://github.com/yourname/gptfixes"
-Repository = "https://github.com/yourname/gptfixes"
+Homepage = "https://github.com/cameronqj/local-tool-proxy"
+Repository = "https://github.com/cameronqj/local-tool-proxy"
+Issues = "https://github.com/cameronqj/local-tool-proxy/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -33,3 +42,20 @@ include = ["proxy*"]
 
 [tool.setuptools.package-data]
 "*" = ["*.json", "*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "proxy/test_rewrite_mock.py"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+extend-exclude = [
+    "benchmark.py",
+    "eval",
+    "proxy/test_*.py",
+]
+
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]
+ignore = ["E501"]

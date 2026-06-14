@@ -2,8 +2,6 @@
 """
 proxy/collapse_report.py
 
-Phase 0 deliverable for NextGrok.
-
 Simple report generator that scans proxy log output (or future trace files)
 and summarizes collapse patterns.
 
@@ -21,11 +19,11 @@ from typing import Dict, List
 
 
 COLLAPSE_LINE_RE = re.compile(
-    r"\[(?P<trace>gptfixes-[a-f0-9]+)\] collapse: category=(?P<cat>\w+) signals=\[(?P<signals>[^\]]*)\]"
+    r"\[(?P<trace>(?:ltp|gptfixes)-[a-f0-9]+)\] collapse: category=(?P<cat>\w+) signals=\[(?P<signals>[^\]]*)\]"
 )
 # Also support the slightly different format used in some log examples
 COLLAPSE_LINE_RE2 = re.compile(
-    r"\[(?P<trace>gptfixes-[^\]]+)\] collapse: category=(?P<cat>\w+)"
+    r"\[(?P<trace>(?:ltp|gptfixes)-[^\]]+)\] collapse: category=(?P<cat>\w+)"
 )
 
 
@@ -70,7 +68,7 @@ def parse_log_lines(lines: List[str]) -> Dict[str, any]:
 
 def format_report(data: Dict) -> str:
     lines = []
-    lines.append("=== NextGrok Phase 0 Collapse Report ===")
+    lines.append("=== local-tool-proxy Collapse Report ===")
     lines.append(f"Traces analyzed: {data['total_traces']}")
     lines.append("")
 
@@ -100,7 +98,7 @@ def format_report(data: Dict) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="NextGrok collapse report generator (Phase 0)")
+    parser = argparse.ArgumentParser(description="local-tool-proxy collapse report generator")
     parser.add_argument("--log-file", type=Path, help="Path to proxy log file")
     parser.add_argument("--from-stdin", action="store_true", help="Read log lines from stdin")
     args = parser.parse_args()

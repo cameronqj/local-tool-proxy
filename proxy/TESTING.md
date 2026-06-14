@@ -18,7 +18,7 @@ REWRITING tool call for gemma4:e4b-mlx: detected JSON in content → proper tool
 ## 1. One-time Setup on Your Machine (the 24 GB M4 Air)
 
 ```bash
-cd ~/code/sandbox/localmodels   # or wherever this repo lives
+cd /path/to/local-tool-proxy
 
 # Install proxy deps (lightweight)
 python3 -m pip install fastapi uvicorn httpx pydantic
@@ -30,7 +30,7 @@ ollama list | grep -E 'gemma4:e4b-mlx|gemma4:e2b-mlx|gpt-oss:20b'
 ## 2. Start the Proxy (in its own terminal)
 
 ```bash
-cd ~/code/sandbox/localmodels
+cd /path/to/local-tool-proxy
 
 python3 -m proxy.server \
   --port 9000 \
@@ -127,7 +127,7 @@ print(find_longest_word('hello, world!'))
 print(find_longest_word('a bb ccc dddd'))
 "
 
-python -m pytest test_buggy.py -q --tb=line
+python3 -m pytest test_buggy.py -q --tb=line
 ```
 
 All tests should pass, and `find_longest_word` should now strip punctuation and handle ties correctly.

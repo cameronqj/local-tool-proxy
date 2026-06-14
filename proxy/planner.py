@@ -1,7 +1,7 @@
 """
 proxy/planner.py
 
-Lightweight "Soft Planner" for NextGrok (Phase 3).
+Lightweight "Soft Planner" for local-tool-proxy stabilize experiments.
 
 **Safety / Contract (critical):**
 - Only has any effect when `--mode stabilize --planner soft` is used.
