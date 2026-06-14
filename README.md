@@ -45,6 +45,91 @@ See [docs/experiment-log.md](docs/experiment-log.md) for the current evidence.
 - It does not replace general routers such as LiteLLM.
 - It does not guarantee that a weak or drifting model will finish a task.
 - It does not log raw prompts by default.
+- It does not create tool intent when the model did not express any. If the
+  model returns plain prose, the proxy leaves it as prose.
+
+## How It Differs From LiteLLM and General Routers
+
+`local-tool-proxy` is a focused repair and diagnostics proxy, not a general LLM
+gateway. General routers such as LiteLLM solve a broad problem — many providers,
+auth, retries, load balancing, cost tracking, format translation across APIs.
+They are excellent at that and this project does not try to replace them.
+
+This proxy does one narrow thing instead: it sits in front of a single
+OpenAI-compatible local server and repairs an important class of *malformed but
+recoverable* tool-call output, while logging the tool-use failure modes it sees.
+
+| | `local-tool-proxy` | General router (e.g. LiteLLM) |
+| --- | --- | --- |
+| Primary goal | Repair malformed local-model tool calls | Route/normalize across many providers |
+| Scope | One upstream, OpenAI-compatible | Many providers and APIs |
+| Tool-call repair | Core feature, tested | Not the focus |
+| Failure-mode diagnostics | Core feature (collapse/drift traces) | Not the focus |
+| Provider breadth, auth, billing | Out of scope | Core feature |
+
+If you need broad routing, use a router. If a local model is *almost* emitting
+tool calls and your harness just can't parse them, that gap is what this repairs.
+The two can compose: point the router at this proxy, or this proxy at one model.
+
+## Evidence Level
+
+This project is deliberate about separating what is proven from what is not.
+
+What is demonstrated by tests and reproducible runs:
+
+- Malformed-but-recoverable tool intent (JSON-in-content, `toolName{...}`,
+  XML-ish blocks) is repaired into valid OpenAI `tool_calls`.
+- Plain prose and unparseable content are **not** turned into fabricated tool
+  calls.
+- Repairs and non-repairs are recorded as sanitized JSONL diagnostics that omit
+  raw prompts and model output.
+
+See [tests/test_claim_boundaries.py](tests/test_claim_boundaries.py) and the
+[demo transcript](docs/demo.md), both of which run with no live model.
+
+What is **not** claimed:
+
+- This does not prove that a local model reliably completes real agentic tasks.
+  End-to-end agent reliability must be measured separately — the captured
+  OpenCode runs reached tool turns but did not pass artifact-level verification.
+- The proxy improves protocol compatibility; it does not make a weak or drifting
+  model finish a task.
+
+The honest, full evidence trail — including the negative results — lives in
+[docs/experiment-log.md](docs/experiment-log.md).
+
+## Relationship to toolcall-repair-bench
+
+This repo is the *proxy*. Measuring how well repair works across models and
+malformed shapes is a separate concern, handled by its companion benchmark,
+[`toolcall-repair-bench`](https://github.com/cameronqj/toolcall-repair-bench).
+Keeping the benchmark separate is intentional: the proxy stays small and focused,
+and the evidence it produces can be scrutinized on its own.
+
+The intended pairing is to check both repos out under the same parent directory:
+
+```text
+parent/
+  local-tool-proxy/        # this repo (the proxy under test)
+  toolcall-repair-bench/   # the companion benchmark + leaderboard
+```
+
+```bash
+# from the shared parent directory
+git clone https://github.com/cameronqj/local-tool-proxy.git
+git clone https://github.com/cameronqj/toolcall-repair-bench.git
+
+# install this proxy editable so the benchmark can import/launch it
+cd local-tool-proxy && python3 -m pip install -e ".[dev]" && cd ..
+
+# run the benchmark against ../local-tool-proxy and generate the leaderboard
+cd toolcall-repair-bench
+# see that repo's README for exact commands; it expects the proxy at ../local-tool-proxy
+```
+
+> The benchmark commands above are illustrative. The authoritative, runnable
+> steps live in the `toolcall-repair-bench` README; this repo does not vendor or
+> execute the benchmark. The path it references is `../local-tool-proxy`.
 
 ## Quick Start
 
@@ -95,7 +180,8 @@ make demo
 # or: python3 demo.py
 ```
 
-Everything runs in-process on localhost — no GPU, no model download.
+Everything runs in-process on localhost — no GPU, no model download. A captured
+run with field-by-field explanation is in [docs/demo.md](docs/demo.md).
 
 ## Docker
 
@@ -251,6 +337,7 @@ See [docs/testing.md](docs/testing.md) for live harness evaluation notes.
 
 - [Architecture](docs/architecture.md)
 - [Configuration](docs/configuration.md)
+- [Demo transcript](docs/demo.md)
 - [Use cases](docs/use-cases.md)
 - [Experiment log](docs/experiment-log.md)
 - [Testing](docs/testing.md)
