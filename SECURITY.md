@@ -14,19 +14,23 @@ The expected deployment is:
 agent harness -> local-tool-proxy -> local model server
 ```
 
-The default host is currently `0.0.0.0` for convenience while experimenting. If
-you do not need LAN access, prefer binding to loopback:
+The default host is `127.0.0.1`, which keeps the proxy local to your machine:
 
 ```bash
 local-tool-proxy --host 127.0.0.1
 ```
 
+If you need LAN access, opt into a broader bind address with `--host 0.0.0.0`.
 If you expose the proxy beyond your machine, put it behind controls you trust and
 review what your client harness and upstream model server can access.
 
 ## Sensitive Data
 
 By default, the proxy does not log full prompts, messages, or tool schemas.
+
+The `--trace-file` flag writes sanitized JSONL metadata about request, rewrite,
+collapse, and stabilization events. It is intended for shareable diagnostics, but
+you should still review traces before publishing them.
 
 The `--debug-log-model-outputs` flag is intentionally loud and dangerous. It can
 log raw harness requests and model outputs. Do not use it with private code,

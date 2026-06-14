@@ -102,7 +102,8 @@ python3 -m proxy.server \
 **Important safety & usage notes:**
 - `stabilize` and `planner` are **explicitly opt-in** behind CLI flags. They are off by default.
 - They only affect requests for models listed in `--compat-models`.
-- Every intervention is logged with `x-local-tool-proxy-trace-id` and clearly marked (e.g. `STABILIZE ATTEMPT`, `planner_soft_hint_used`). The legacy `x-gptfixes-trace-id` header is also emitted for now.
+- Every intervention is logged with `x-local-tool-proxy-trace-id` and clearly marked (e.g. `STABILIZE ATTEMPT`, `planner_soft_hint_used`).
+- Use `--trace-file path/to/traces.jsonl` for sanitized JSONL diagnostics that omit raw prompts and model output.
 - You can always reproduce any run with stabilization completely disabled by using `--mode compat`.
 - These features change model behavior (they add internal steering messages on retries). Treat them as experimental middleware.
 

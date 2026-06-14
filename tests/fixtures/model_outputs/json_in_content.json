@@ -1,0 +1,7 @@
+{
+  "name": "write_file",
+  "arguments": {
+    "path": "buggy.py",
+    "content": "fixed code here"
+  }
+}

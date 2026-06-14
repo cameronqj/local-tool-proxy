@@ -23,7 +23,9 @@ import argparse
 import json
 import logging
 import sys
+import time
 import uuid
+from pathlib import Path
 from typing import Set, Optional, Dict, Any
 
 import httpx
@@ -36,11 +38,10 @@ from starlette.background import BackgroundTask
 # Import our small-model rewriters (the core fix logic)
 try:
     from .rewriters import (
+        extract_known_tool_names,
         parse_tool_call_from_content,
         looks_like_tool_call_json,
         synthesize_tool_call_response,
-        rewrite_stream_chunk,
-        is_tool_call_delta,
     )
     from .collapse import (
         classify_from_openai_response,
@@ -61,11 +62,10 @@ try:
 except ImportError:
     # Allow running as python -m proxy.server from repo root
     from rewriters import (
+        extract_known_tool_names,
         parse_tool_call_from_content,
         looks_like_tool_call_json,
         synthesize_tool_call_response,
-        rewrite_stream_chunk,
-        is_tool_call_delta,
     )
     from collapse import (
         classify_from_openai_response,
@@ -97,10 +97,12 @@ COMPAT_MODELS: Set[str] = set()
 MODE: str = "compat"  # compat | observe | stabilize  (per nextgrok.prompt)
 STABILIZE_MAX_RETRIES: int = 1
 PLANNER_MODE: str = "disabled"  # disabled | observe | soft   (only active with stabilize)
+COMPAT_STREAMING_REWRITE: bool = False
 CLIENT = httpx.AsyncClient(timeout=600.0)  # long timeout for generation
 
 # Diagnostic flag (gated raw model output logging)
 DEBUG_LOG_MODEL_OUTPUTS: bool = False
+TRACE_FILE: Optional[Path] = None
 
 # Simple in-memory per-trace state for drift scoring (Phase 1 Observe)
 # Keyed by trace_id. Reset on process restart. Good enough for single-run evaluation.
@@ -125,6 +127,10 @@ async def lifespan(app: FastAPI):
         logger.info(f"  planner: {PLANNER_MODE}")
         logger.warning("  *** stabilize mode is EXPERIMENTAL and will add internal steering messages on retries ***")
         logger.warning("  *** To disable stabilize behavior: use --mode compat ***")
+    if COMPAT_STREAMING_REWRITE:
+        logger.warning("  *** compat streaming rewrite is EXPERIMENTAL and buffers tool streams ***")
+    if TRACE_FILE:
+        logger.info(f"  trace file: {TRACE_FILE}")
     logger.info("  Goal: Make stock OpenCode (and similar harnesses) work with small local models")
     logger.info("  via clean in-line translation of tool calling output.")
     yield
@@ -140,6 +146,36 @@ def is_compat_model(model: str) -> bool:
         return False
     model = model.lower()
     return any(m in model for m in COMPAT_MODELS)
+
+
+def _upstream_url(path: str) -> str:
+    """Build an upstream URL without duplicating /v1 when the base already has it."""
+    base = OLLAMA_BASE.rstrip("/")
+    clean_path = path.lstrip("/")
+    if base.endswith("/v1") and clean_path.startswith("v1/"):
+        clean_path = clean_path[3:]
+    elif not base.endswith("/v1") and not clean_path.startswith("v1/"):
+        clean_path = f"v1/{clean_path}"
+    return f"{base}/{clean_path}"
+
+
+def _write_trace_event(trace_id: str, event: str, **fields: Any) -> None:
+    """Append a sanitized JSONL trace event when --trace-file is configured."""
+    if not TRACE_FILE:
+        return
+
+    record = {
+        "ts": time.time(),
+        "trace_id": trace_id,
+        "event": event,
+        **fields,
+    }
+    try:
+        TRACE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with TRACE_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, sort_keys=True) + "\n")
+    except Exception as e:
+        logger.warning(f"[{trace_id}] failed to write trace event: {e}")
 
 
 def _log_harness_request(payload: dict, trace_id: Optional[str] = None):
@@ -188,7 +224,7 @@ def _log_harness_request(payload: dict, trace_id: Optional[str] = None):
 
 async def _forward_request(request: Request, path: str):
     """Core transparent forwarder. Handles both streaming and non-streaming."""
-    url = f"{OLLAMA_BASE.rstrip('/')}/{path.lstrip('/')}"
+    url = _upstream_url(path)
 
     # Read body once
     body = await request.body()
@@ -276,19 +312,42 @@ async def _forward_request(request: Request, path: str):
 
 @app.get("/v1/models")
 @app.get("/models")
-async def list_models():
+async def list_models(request: Request):
     """
-    Clean models endpoint. Helps stock OpenCode and other harnesses
-    discover the models without falling back to 'ollama-cloud'.
+    Proxy upstream models so clients see the real local server inventory.
+
+    If the upstream is unavailable, fall back to configured compatibility models
+    so harnesses still get a useful local response during setup/debugging.
     """
-    models = []
-    for m in sorted(COMPAT_MODELS):
-        models.append({
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in
+               ("host", "connection", "content-length")}
+    try:
+        upstream = await CLIENT.get(_upstream_url("models"), headers=headers)
+        content_type = upstream.headers.get("content-type", "")
+        if upstream.status_code < 400 and "application/json" in content_type:
+            data = upstream.json()
+            for model in data.get("data", []) or []:
+                model_id = str(model.get("id", ""))
+                model["local_tool_proxy_compat"] = is_compat_model(model_id)
+            return JSONResponse(content=data, status_code=upstream.status_code)
+        return Response(
+            content=upstream.content,
+            status_code=upstream.status_code,
+            media_type=content_type or None,
+        )
+    except httpx.RequestError as e:
+        logger.warning(f"Upstream model listing failed, using compat fallback: {e}")
+
+    models = [
+        {
             "id": m,
             "object": "model",
             "created": 1700000000,
             "owned_by": "local-tool-proxy",
-        })
+            "local_tool_proxy_compat": True,
+        }
+        for m in sorted(COMPAT_MODELS)
+    ]
     return {"object": "list", "data": models}
 
 
@@ -304,6 +363,8 @@ async def health():
         "active_traces": len(TRACE_DRIFT),
         "stabilize_max_retries": STABILIZE_MAX_RETRIES if MODE == "stabilize" else 0,
         "planner": PLANNER_MODE,
+        "compat_streaming_rewrite": COMPAT_STREAMING_REWRITE,
+        "trace_file": str(TRACE_FILE) if TRACE_FILE else None,
     }
 
 
@@ -371,6 +432,8 @@ async def chat_completions(request: Request):
             pass
 
     if compat and has_tools:
+        if payload.get("stream") and COMPAT_STREAMING_REWRITE:
+            return await _handle_streaming_tool_request_for_compat_model(request, model, body, payload)
         return await _handle_tool_request_for_compat_model(request, model, body)
 
     # Normal traffic (including non-tool requests for compat models)
@@ -383,6 +446,153 @@ async def catch_all(request: Request, path: str):
     Transparent catch-all for everything else.
     """
     return await _forward_request(request, path)
+
+
+def _sse_json_event(data: Dict[str, Any]) -> bytes:
+    return f"data: {json.dumps(data, separators=(',', ':'))}\n\n".encode("utf-8")
+
+
+def _extract_stream_content(raw_chunks: list[bytes]) -> tuple[str, Dict[str, Any]]:
+    """Collect assistant content deltas from OpenAI-compatible SSE chunks."""
+    content_parts: list[str] = []
+    metadata: Dict[str, Any] = {}
+
+    for raw in raw_chunks:
+        for line in raw.decode("utf-8", errors="ignore").splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            try:
+                event = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            for key in ("id", "object", "created", "model", "system_fingerprint"):
+                if key in event and key not in metadata:
+                    metadata[key] = event[key]
+            choices = event.get("choices", []) or []
+            if not choices:
+                continue
+            delta = choices[0].get("delta", {}) or {}
+            if delta.get("tool_calls") or delta.get("function_call"):
+                metadata["already_had_tool_delta"] = True
+            if isinstance(delta.get("content"), str):
+                content_parts.append(delta["content"])
+
+    return "".join(content_parts), metadata
+
+
+async def _handle_streaming_tool_request_for_compat_model(
+    request: Request,
+    model: str,
+    original_body: bytes,
+    payload: Dict[str, Any],
+) -> Response:
+    """Experimental streaming repair path.
+
+    The stable compat path still forces non-streaming. This opt-in path buffers a
+    streaming upstream response, rewrites completed content tool intent when it
+    can, and otherwise replays the original stream.
+    """
+    trace_id = f"ltp-{uuid.uuid4().hex[:12]}"
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in
+               ("host", "connection", "content-length")}
+    tool_names = extract_known_tool_names(payload)
+
+    logger.info(f"[{trace_id}] COMPAT STREAM TOOL PATH for {model} — experimental buffered rewrite")
+    _write_trace_event(
+        trace_id,
+        "request",
+        model=model,
+        mode=MODE,
+        stream_requested=True,
+        tools_count=len(payload.get("tools") or []),
+        streaming_rewrite=True,
+    )
+
+    try:
+        upstream = await CLIENT.send(
+            CLIENT.build_request(
+                method="POST",
+                url=_upstream_url("chat/completions"),
+                content=original_body,
+                headers=headers,
+            ),
+            stream=True,
+        )
+    except httpx.RequestError as e:
+        logger.error(f"[{trace_id}] upstream streaming error: {e}")
+        _write_trace_event(trace_id, "upstream_error", model=model, error_type=type(e).__name__)
+        return Response(content=str(e), status_code=502)
+
+    if upstream.status_code >= 400:
+        content = await upstream.aread()
+        await upstream.aclose()
+        return Response(content=content, status_code=upstream.status_code)
+
+    raw_chunks: list[bytes] = []
+    async for chunk in upstream.aiter_bytes():
+        raw_chunks.append(chunk)
+    await upstream.aclose()
+
+    content_str, metadata = _extract_stream_content(raw_chunks)
+    tool_calls = None
+    if not metadata.get("already_had_tool_delta"):
+        tool_calls = parse_tool_call_from_content(content_str, known_tool_names=tool_names or None)
+
+    if tool_calls:
+        logger.info(f"[{trace_id}] ✓ STREAM REWROTE tool call(s): {[t['function']['name'] for t in tool_calls]}")
+        _write_trace_event(
+            trace_id,
+            "rewrite",
+            model=model,
+            rewrite_kind="stream_content_to_tool_calls",
+            tool_names=[t["function"]["name"] for t in tool_calls],
+        )
+
+        event = {
+            "id": metadata.get("id", f"chatcmpl-{trace_id}"),
+            "object": "chat.completion.chunk",
+            "created": metadata.get("created", int(time.time())),
+            "model": metadata.get("model", model),
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "tool_calls": tool_calls,
+                },
+                "finish_reason": "tool_calls",
+            }],
+        }
+        if metadata.get("system_fingerprint"):
+            event["system_fingerprint"] = metadata["system_fingerprint"]
+
+        async def rewritten_stream():
+            yield _sse_json_event(event)
+            yield b"data: [DONE]\n\n"
+
+        resp = StreamingResponse(rewritten_stream(), media_type="text/event-stream")
+        resp.headers["x-local-tool-proxy-trace-id"] = trace_id
+        return resp
+
+    logger.info(f"[{trace_id}] No streaming rewrite; replaying upstream stream for {model}")
+    _write_trace_event(
+        trace_id,
+        "stream_replay",
+        model=model,
+        had_content=bool(content_str),
+        already_had_tool_delta=bool(metadata.get("already_had_tool_delta")),
+    )
+
+    async def replay_stream():
+        for chunk in raw_chunks:
+            yield chunk
+
+    resp = StreamingResponse(replay_stream(), media_type="text/event-stream")
+    resp.headers["x-local-tool-proxy-trace-id"] = trace_id
+    return resp
 
 
 async def _handle_tool_request_for_compat_model(
@@ -432,10 +642,6 @@ async def _handle_tool_request_for_compat_model(
         except Exception:
             pass
 
-    # Phase 3 improvement: respect per-model preference for forcing non-stream on tool requests
-    # (for now we key off the compat model list; later this can come from profiles)
-    force_non_stream = model and any(m in model.lower() for m in COMPAT_MODELS)
-
     # Structured logging for the request (Phase 3)
     try:
         orig_payload = json.loads(original_body)
@@ -446,6 +652,16 @@ async def _handle_tool_request_for_compat_model(
         stream_requested = None
 
     logger.info(f"[{trace_id}] request: model={model} mode={MODE} stream_requested={stream_requested} tools_count={tools_count} rigid={is_rigid}")
+    _write_trace_event(
+        trace_id,
+        "request",
+        model=model,
+        mode=MODE,
+        stream_requested=stream_requested,
+        tools_count=tools_count,
+        rigid=is_rigid,
+        streaming_rewrite=False,
+    )
 
     # Force non-streaming for reliability (Phase 3)
     try:
@@ -455,12 +671,7 @@ async def _handle_tool_request_for_compat_model(
     except Exception:
         forced_body = original_body
 
-    base = OLLAMA_BASE.rstrip("/")
-    # Avoid double /v1 if the configured base already ends with it
-    if base.endswith("/v1"):
-        url = f"{base}/chat/completions"
-    else:
-        url = f"{base}/v1/chat/completions"
+    url = _upstream_url("chat/completions")
     headers = {k: v for k, v in request.headers.items() if k.lower() not in
                ("host", "connection", "content-length")}
 
@@ -509,6 +720,13 @@ async def _handle_tool_request_for_compat_model(
             tool_calls = parse_tool_call_from_content(content_str, known_tool_names=tool_names or None)
             if tool_calls:
                 logger.info(f"[{trace_id}] ✓ REWROTE tool call(s) for stock OpenCode: { [t['function']['name'] for t in tool_calls] }")
+                _write_trace_event(
+                    trace_id,
+                    "rewrite",
+                    model=model,
+                    rewrite_kind="content_to_tool_calls",
+                    tool_names=[t["function"]["name"] for t in tool_calls],
+                )
 
                 # Phase 1: classification + drift even on successful rewrite path
                 try:
@@ -516,6 +734,13 @@ async def _handle_tool_request_for_compat_model(
                     if pre_category != "tool_calls":
                         pre_signals = get_collapse_signals(pre_category, had_tools_in_request=True)
                         logger.info(f"[{trace_id}] collapse_before_rewrite: category={pre_category} signals={pre_signals}")
+                        _write_trace_event(
+                            trace_id,
+                            "collapse_before_rewrite",
+                            model=model,
+                            category=pre_category,
+                            signals=pre_signals,
+                        )
 
                     # Treat rewrite success as a tool turn for drift purposes
                     state = TRACE_DRIFT[trace_id]
@@ -539,7 +764,6 @@ async def _handle_tool_request_for_compat_model(
                 await upstream.aclose()
                 resp = JSONResponse(content=rewritten)
                 resp.headers["x-local-tool-proxy-trace-id"] = trace_id
-                resp.headers["x-gptfixes-trace-id"] = trace_id
                 return resp
 
     # No rewrite happened — return original
@@ -588,6 +812,14 @@ async def _handle_tool_request_for_compat_model(
 
         # Always log classification (Phase 0+)
         logger.info(f"[{trace_id}] collapse: category={category} signals={signals}")
+        _write_trace_event(
+            trace_id,
+            "collapse",
+            model=model,
+            category=category,
+            signals=signals,
+            drift=drift_score,
+        )
 
         # In observe or higher, log drift score on every tool turn
         if MODE in ("observe", "stabilize"):
@@ -646,6 +878,14 @@ async def _handle_tool_request_for_compat_model(
                 retry_signals = get_collapse_signals(retry_category, had_tools_in_request=True)
 
                 logger.info(f"[{trace_id}] stabilize_retry_result: category={retry_category} signals={retry_signals}")
+                _write_trace_event(
+                    trace_id,
+                    "stabilize_retry",
+                    model=model,
+                    attempt=attempt,
+                    category=retry_category,
+                    signals=retry_signals,
+                )
 
                 use_retry, reason = should_use_retry_response(data, retry_data)
 
@@ -668,7 +908,6 @@ async def _handle_tool_request_for_compat_model(
                                 pass
                     resp = JSONResponse(content=retry_data)
                     resp.headers["x-local-tool-proxy-trace-id"] = trace_id
-                    resp.headers["x-gptfixes-trace-id"] = trace_id
                     return resp
                 else:
                     logger.info(f"[{trace_id}] stabilize retry did not produce tool_calls (reason={reason}) — will fallback")
@@ -681,7 +920,6 @@ async def _handle_tool_request_for_compat_model(
     await upstream.aclose()
     resp = Response(content=content, status_code=upstream.status_code)
     resp.headers["x-local-tool-proxy-trace-id"] = trace_id
-    resp.headers["x-gptfixes-trace-id"] = trace_id
     return resp
 
 
@@ -692,7 +930,7 @@ async def _handle_tool_request_for_compat_model(
 def main():
     parser = argparse.ArgumentParser(description="local-tool-proxy")
     parser.add_argument("--port", type=int, default=9000, help="Port to listen on")
-    parser.add_argument("--host", default="0.0.0.0", help="Host to bind")
+    parser.add_argument("--host", default="127.0.0.1", help="Host to bind (default: 127.0.0.1)")
     parser.add_argument("--ollama-base", default="http://localhost:11434/v1",
                         help="Base URL of the real Ollama OpenAI-compatible endpoint")
     parser.add_argument("--compat-models", default="gemma4:e4b-mlx,gemma4:e2b-mlx,gpt-oss:20b",
@@ -703,17 +941,26 @@ def main():
                         help="Max automatic upstream retries in stabilize mode (conservative, default 1)")
     parser.add_argument("--planner", default="disabled", choices=["disabled", "observe", "soft"],
                         help="Planner (only active with --mode stabilize): disabled | observe | soft")
+    parser.add_argument("--compat-streaming-rewrite", action="store_true",
+                        help="EXPERIMENTAL: buffer streaming compat tool turns and rewrite completed "
+                             "content tool calls into SSE tool_call chunks when possible. Default: off.")
+    parser.add_argument("--trace-file", type=Path,
+                        help="Optional sanitized JSONL trace file for request/rewrite/collapse events. "
+                             "Does not include raw prompts or model output.")
     parser.add_argument("--debug-log-model-outputs", action="store_true",
                         help="DANGEROUS: Log full raw model inputs (prompts, tools, messages) and outputs. "
                              "Only for local debugging. Never use with private/sensitive code. Default: off.")
     args = parser.parse_args()
 
-    global OLLAMA_BASE, COMPAT_MODELS, MODE, STABILIZE_MAX_RETRIES, PLANNER_MODE, DEBUG_LOG_MODEL_OUTPUTS
+    global OLLAMA_BASE, COMPAT_MODELS, MODE, STABILIZE_MAX_RETRIES, PLANNER_MODE
+    global COMPAT_STREAMING_REWRITE, DEBUG_LOG_MODEL_OUTPUTS, TRACE_FILE
     OLLAMA_BASE = args.ollama_base
     COMPAT_MODELS = {m.strip().lower() for m in args.compat_models.split(",") if m.strip()}
     MODE = args.mode
     STABILIZE_MAX_RETRIES = max(0, args.stabilize_max_retries)
     PLANNER_MODE = args.planner
+    COMPAT_STREAMING_REWRITE = args.compat_streaming_rewrite
+    TRACE_FILE = args.trace_file
     DEBUG_LOG_MODEL_OUTPUTS = args.debug_log_model_outputs
 
     if DEBUG_LOG_MODEL_OUTPUTS:

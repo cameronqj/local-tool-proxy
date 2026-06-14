@@ -51,11 +51,32 @@ The mock rewrite test validates the central mechanism in a controlled setting:
 Current local verification:
 
 ```text
-14 passed
+20 passed
 ```
 
 That is the strongest positive result so far. It demonstrates that the proxy can
 repair a specific, common wire-format failure without requiring a patched client.
+
+## Live Ollama Smoke Test
+
+On 2026-06-13, the current proxy branch was smoke-tested against a local Ollama
+server with `gemma4:e4b-mlx`.
+
+What passed:
+
+- `/v1/models` proxied the live Ollama model list and marked configured
+  compatibility models.
+- A non-streaming tool request through the proxy returned native OpenAI-style
+  `tool_calls`.
+- `--trace-file` wrote sanitized JSONL request/collapse metadata without raw
+  prompt or model-output text.
+- With `--compat-streaming-rewrite` enabled, a streamed tool request completed
+  with streamed `tool_calls`. Because Ollama already emitted native tool-call
+  deltas, the proxy replayed the upstream stream rather than rewriting it.
+
+This is a live integration smoke test, not a benchmark and not an artifact-level
+agent success result. It confirms that the updated proxy surface still works
+against an actual local model server.
 
 ## Real Harness Result
 
@@ -91,6 +112,9 @@ That matters. The public claim should be:
 | --- | --- |
 | Mock JSON-in-content upstream | Rewritten into valid OpenAI `tool_calls` |
 | Automated tests | Passing locally |
+| Live Ollama `/v1/models` smoke | Proxied real model list with compat markers |
+| Live Ollama tool-call smoke | Returned native non-streaming and streaming `tool_calls` through proxy |
+| Sanitized JSONL tracing | Wrote request/collapse/replay metadata without raw prompts |
 | Real OpenCode compatibility path | Triggered on Gemma 4 E4B MLX runs |
 | Drift/collapse logging | Captured useful categories and trace ids |
 | Stabilize retry path | Exercised once on a rigid prompt, without recovery |
@@ -128,9 +152,9 @@ agents.
 
 ## Next Experiments
 
-1. Add more real malformed outputs as parser fixtures.
+1. Continue adding real malformed outputs as parser fixtures.
 2. Compare LiteLLM against `local-tool-proxy` on the same tasks.
-3. Add streaming tool-call reconstruction.
+3. Expand the experimental streaming rewrite path toward true incremental tool-call deltas.
 4. Re-run artifact-verified OpenCode tasks after each compatibility improvement.
 5. Keep exit-code success separate from task-artifact success.
 6. Curate a small public `docs/history/` trail rather than committing full raw

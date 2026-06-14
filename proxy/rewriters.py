@@ -9,9 +9,9 @@ into the clean streaming tool_calls format that normal OpenCode-like harnesses e
 This module is intentionally small and focused. It is the heart of what makes
 the in-line proxy valuable for the 24 GB fanless M4 Air use case.
 
-Current status: skeleton + first "json in content" detector/synthesizer.
-More parsers (XML-ish, single-tool-text, legacy function_call, reasoning_content stripping)
-will be added here, drawing from:
+Current status: tested parsers for JSON-in-content, JSON-ish repairs,
+toolName{...} snippets, and XML-ish tool blocks. Future parser additions may
+include legacy function_call variants and reasoning_content stripping, drawing from:
   - SmallHarness fallback logic (looks_like_start_of_tool_call, try_parse_inline_tool_call, etc.)
   - OpenCode PR #16531 toolParser (json / raw-function-call / single-tool-text + SSE rewriting)
   - Real failure traces we collected earlier in this repo

@@ -37,6 +37,9 @@ def test_help_mentions_experimental():
     output = result.stdout + result.stderr
     assert "stabilize" in output.lower()
     assert "experimental" in output.lower() or "opt-in" in output.lower()
+    assert "127.0.0.1" in output
+    assert "--compat-streaming-rewrite" in output
+    assert "--trace-file" in output
     print("--help documents experimental nature: OK")
 
 

@@ -28,10 +28,12 @@ See [docs/experiment-log.md](docs/experiment-log.md) for the current evidence.
 
 - Provides `/v1/chat/completions`, `/v1/models`, and health endpoints.
 - Passes ordinary traffic through to the upstream model server.
+- Proxies upstream model listing and marks configured compatibility models.
 - Detects tool-using requests for configured compatibility models.
 - Forces a reliable non-streaming upstream request for those tool turns.
 - Rewrites common local-model tool-call formats into OpenAI-style `tool_calls`.
 - Adds optional diagnostics for model tool-use collapse.
+- Can write sanitized JSONL traces for request/rewrite/collapse events.
 - Offers an experimental, opt-in stabilization mode that can retry one collapsed
   tool turn.
 
@@ -56,15 +58,17 @@ Start the proxy in front of Ollama:
 
 ```bash
 local-tool-proxy \
+  --host 127.0.0.1 \
   --port 9000 \
   --ollama-base http://localhost:11434/v1 \
   --compat-models gemma4:e4b-mlx,gemma4:e2b-mlx,gpt-oss:20b
 ```
 
-If you only need local access, bind to loopback:
+The default bind host is `127.0.0.1`. If another machine on your trusted LAN
+must reach the proxy, opt into a broader bind address:
 
 ```bash
-local-tool-proxy --host 127.0.0.1
+local-tool-proxy --host 0.0.0.0
 ```
 
 Point your OpenAI-compatible client at:
@@ -145,6 +149,28 @@ The optional soft planner only affects stabilization retry hints:
 ```bash
 local-tool-proxy --mode stabilize --planner soft
 ```
+
+For sanitized, machine-readable diagnostics, add a trace file:
+
+```bash
+local-tool-proxy --trace-file traces/local-tool-proxy.jsonl
+```
+
+Trace events include request metadata, rewrite decisions, collapse categories,
+and stabilization attempts. They intentionally do not include raw prompts or
+model output. Use `--debug-log-model-outputs` only for local debugging with
+non-sensitive data.
+
+Streaming tool-call rewriting is available as a separate experimental flag:
+
+```bash
+local-tool-proxy --compat-streaming-rewrite
+```
+
+When enabled, streaming compat tool turns are buffered. If the completed stream
+contains parseable tool intent, the proxy emits a tool-call stream; otherwise it
+replays the upstream stream unchanged. The default compatibility path remains
+non-streaming for reliability.
 
 Experimental modes are opt-in by design. See
 [docs/constitution.md](docs/constitution.md) and

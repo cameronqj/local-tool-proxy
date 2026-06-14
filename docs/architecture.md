@@ -22,7 +22,7 @@ The main design goal is protocol repair, not orchestration.
 2. The proxy extracts the model name and checks whether tools are present.
 3. If the model is not configured as a compatibility model, the request is passed through.
 4. If the model is configured and tools are present, the proxy uses the compatibility path.
-5. The compatibility path forces a non-streaming upstream request for reliability.
+5. The default compatibility path forces a non-streaming upstream request for reliability.
 6. The proxy inspects the upstream response.
 7. If assistant content contains tool intent, the proxy rewrites it into `tool_calls`.
 8. The client receives an OpenAI-compatible response.
@@ -46,7 +46,7 @@ Current strategies include:
 - JSON-ish repair.
 - `toolName{...}` fallback when known tool names are available.
 - XML-ish tool blocks.
-- Basic streaming accumulator scaffolding.
+- Experimental buffered streaming rewrite when `--compat-streaming-rewrite` is enabled.
 
 Parser behavior should fail closed: prose that merely resembles a tool call
 should not become a tool call unless the strategy has enough evidence.
@@ -70,7 +70,7 @@ does not own execution.
 ## Public Endpoints
 
 - `/health`: basic process health.
-- `/v1/models`: proxied model listing.
+- `/v1/models`: proxied model listing, with configured compatibility models marked.
 - `/v1/chat/completions`: OpenAI-compatible chat completions path.
 
 ## Safety Boundary
@@ -82,7 +82,10 @@ the workspace, or decide task success.
 
 For configured compatibility models, tool-using requests are forced to
 non-streaming upstream calls. This improves reliability for small local models,
-but means full streaming tool-call reconstruction remains future work.
+but means full incremental streaming tool-call reconstruction remains future
+work.
 
-Clients that depend on streaming tool-call deltas may need additional testing
-before they are a good fit.
+Clients that depend on streaming tool-call deltas can opt into
+`--compat-streaming-rewrite`. That path buffers the upstream stream and emits a
+repaired tool-call stream only when the completed content parses confidently; it
+is experimental and not a full incremental argument streamer.

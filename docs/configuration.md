@@ -28,11 +28,15 @@ local-tool-proxy --help
 
 ## `--host`
 
-Host to bind. Prefer `127.0.0.1` unless another machine on your network needs to
-reach the proxy.
+Host to bind. The default is `127.0.0.1`, which keeps the proxy local to your
+machine.
 
-The current CLI default is `0.0.0.0`, which is convenient for LAN testing but
-broader than many local-only workflows need.
+If another machine on a trusted network needs to reach the proxy, opt into a
+broader bind address:
+
+```bash
+local-tool-proxy --host 0.0.0.0
+```
 
 ## `--port`
 
@@ -85,6 +89,31 @@ Only relevant with `--mode stabilize`.
 
 The planner does not execute work or decide task success. It only affects retry
 instructions in stabilization experiments.
+
+## `--compat-streaming-rewrite`
+
+Experimental and disabled by default.
+
+When enabled, configured compatibility-model tool turns that request streaming
+are sent upstream as streaming requests, buffered by the proxy, and rewritten
+only if the completed stream contains parseable tool intent. If no confident
+rewrite is possible, the original upstream stream is replayed.
+
+Use this only when you are testing clients that require streaming. The normal
+compatibility path still forces non-streaming tool turns because that is the
+more reliable behavior for small local models.
+
+## `--trace-file`
+
+Writes sanitized JSONL trace events to the provided path:
+
+```bash
+local-tool-proxy --trace-file traces/local-tool-proxy.jsonl
+```
+
+Trace records include metadata such as trace id, model, mode, tool count,
+rewrite type, collapse category, and stabilization attempt result. They do not
+include raw prompts, tool schemas, or model output.
 
 ## `--debug-log-model-outputs`
 
