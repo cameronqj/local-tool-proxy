@@ -39,9 +39,10 @@ from starlette.background import BackgroundTask
 try:
     from .rewriters import (
         extract_known_tool_names,
-        parse_tool_call_from_content,
-        looks_like_tool_call_json,
         synthesize_tool_call_response,
+        decide_repair,
+        decide_message_repair,
+        REASON_VALID_NATIVE,
     )
     from .collapse import (
         classify_from_openai_response,
@@ -63,9 +64,10 @@ except ImportError:
     # Allow running as python -m proxy.server from repo root
     from rewriters import (
         extract_known_tool_names,
-        parse_tool_call_from_content,
-        looks_like_tool_call_json,
         synthesize_tool_call_response,
+        decide_repair,
+        decide_message_repair,
+        REASON_VALID_NATIVE,
     )
     from collapse import (
         classify_from_openai_response,
@@ -539,16 +541,23 @@ async def _handle_streaming_tool_request_for_compat_model(
 
     content_str, metadata = _extract_stream_content(raw_chunks)
     tool_calls = None
+    stream_reason = None
     if not metadata.get("already_had_tool_delta"):
-        tool_calls = parse_tool_call_from_content(content_str, known_tool_names=tool_names or None)
+        # Same schema-aware decision as the non-streaming path: only emit a
+        # tool-call stream for a complete, in-schema call.
+        decision = decide_repair(content_str, payload.get("tools") or [])
+        stream_reason = decision.reason
+        if decision.repaired:
+            tool_calls = decision.tool_calls
 
     if tool_calls:
-        logger.info(f"[{trace_id}] ✓ STREAM REWROTE tool call(s): {[t['function']['name'] for t in tool_calls]}")
+        logger.info(f"[{trace_id}] ✓ STREAM REWROTE tool call(s): {[t['function']['name'] for t in tool_calls]} (reason={stream_reason})")
         _write_trace_event(
             trace_id,
             "rewrite",
             model=model,
             rewrite_kind="stream_content_to_tool_calls",
+            reason=stream_reason,
             tool_names=[t["function"]["name"] for t in tool_calls],
         )
 
@@ -582,6 +591,7 @@ async def _handle_streaming_tool_request_for_compat_model(
         trace_id,
         "stream_replay",
         model=model,
+        reason=stream_reason,
         had_content=bool(content_str),
         already_had_tool_delta=bool(metadata.get("already_had_tool_delta")),
     )
@@ -697,77 +707,93 @@ async def _handle_tool_request_for_compat_model(
         return Response(content=content, status_code=upstream.status_code)
 
     choices = data.get("choices", [])
+    repair_reason: Optional[str] = None
     if choices:
         msg = choices[0].get("message", {}) or {}
         content_str = msg.get("content") or ""
         finish = choices[0].get("finish_reason")
 
-        if looks_like_tool_call_json(content_str):
-            # Extract known tool names from the original request so the rewriter
-            # can use ToolBridge-style name-guided parsing (big help for creative
-            # "toolName{json}" or XML output from small models).
-            tool_names: list[str] = []
+        # Extract the full declared tool specs so the decision layer can do
+        # schema-aware validation (required args) — not just name-guided parsing.
+        tool_specs: list = []
+        try:
+            tool_specs = json.loads(original_body).get("tools") or []
+        except Exception:
+            pass
+
+        # Schema-aware decision: emit tool_calls only for a complete, in-schema
+        # call; otherwise abstain with an explicit reason code (never fabricate).
+        decision = decide_message_repair(msg, tool_specs)
+        repair_reason = decision.reason
+
+        if decision.repaired and decision.reason != REASON_VALID_NATIVE:
+            tool_calls = decision.tool_calls
+            logger.info(f"[{trace_id}] ✓ REWROTE tool call(s) for stock OpenCode: "
+                        f"{[t['function']['name'] for t in tool_calls]} (reason={decision.reason})")
+            _write_trace_event(
+                trace_id,
+                "rewrite",
+                model=model,
+                rewrite_kind="content_to_tool_calls",
+                reason=decision.reason,
+                tool_names=[t["function"]["name"] for t in tool_calls],
+            )
+
+            # Phase 1: classification + drift even on successful rewrite path
             try:
-                orig = json.loads(original_body)
-                for t in (orig.get("tools") or []):
-                    fn = t.get("function") or t
-                    name = fn.get("name")
-                    if name:
-                        tool_names.append(name)
+                pre_category = classify_from_openai_response(data, had_tools_in_request=True)
+                if pre_category != "tool_calls":
+                    pre_signals = get_collapse_signals(pre_category, had_tools_in_request=True)
+                    logger.info(f"[{trace_id}] collapse_before_rewrite: category={pre_category} signals={pre_signals}")
+                    _write_trace_event(
+                        trace_id,
+                        "collapse_before_rewrite",
+                        model=model,
+                        category=pre_category,
+                        signals=pre_signals,
+                    )
+
+                # Treat rewrite success as a tool turn for drift purposes
+                state = TRACE_DRIFT[trace_id]
+                state["tool_streak"] += 1
+                state["turns_since_last_tool"] = 0
+                state["total_tool_turns"] += 1
+
+                if MODE in ("observe", "stabilize"):
+                    logger.info(f"[{trace_id}] drift: tool_streak={state['tool_streak']} total_tool_turns={state['total_tool_turns']} (after rewrite, mode={MODE})")
             except Exception:
                 pass
 
-            tool_calls = parse_tool_call_from_content(content_str, known_tool_names=tool_names or None)
-            if tool_calls:
-                logger.info(f"[{trace_id}] ✓ REWROTE tool call(s) for stock OpenCode: { [t['function']['name'] for t in tool_calls] }")
-                _write_trace_event(
-                    trace_id,
-                    "rewrite",
-                    model=model,
-                    rewrite_kind="content_to_tool_calls",
-                    tool_names=[t["function"]["name"] for t in tool_calls],
-                )
+            rewritten = synthesize_tool_call_response(content_str, tool_calls, finish or "tool_calls")
 
-                # Phase 1: classification + drift even on successful rewrite path
-                try:
-                    pre_category = classify_from_openai_response(data, had_tools_in_request=True)
-                    if pre_category != "tool_calls":
-                        pre_signals = get_collapse_signals(pre_category, had_tools_in_request=True)
-                        logger.info(f"[{trace_id}] collapse_before_rewrite: category={pre_category} signals={pre_signals}")
-                        _write_trace_event(
-                            trace_id,
-                            "collapse_before_rewrite",
-                            model=model,
-                            category=pre_category,
-                            signals=pre_signals,
-                        )
+            # Preserve important fields
+            for key in ("id", "object", "created", "model", "usage", "system_fingerprint"):
+                if key in data:
+                    rewritten[key] = data[key]
+            rewritten["model"] = model
 
-                    # Treat rewrite success as a tool turn for drift purposes
-                    state = TRACE_DRIFT[trace_id]
-                    state["tool_streak"] += 1
-                    state["turns_since_last_tool"] = 0
-                    state["total_tool_turns"] += 1
+            await upstream.aclose()
+            resp = JSONResponse(content=rewritten)
+            resp.headers["x-local-tool-proxy-trace-id"] = trace_id
+            resp.headers["x-local-tool-proxy-reason"] = decision.reason
+            return resp
 
-                    if MODE in ("observe", "stabilize"):
-                        logger.info(f"[{trace_id}] drift: tool_streak={state['tool_streak']} total_tool_turns={state['total_tool_turns']} (after rewrite, mode={MODE})")
-                except Exception:
-                    pass
+        if decision.reason == REASON_VALID_NATIVE:
+            logger.info(f"[{trace_id}] upstream returned native tool_calls — passing through unchanged")
+            _write_trace_event(
+                trace_id,
+                "pass_through",
+                model=model,
+                reason=decision.reason,
+                tool_names=[t.get("function", {}).get("name") for t in decision.tool_calls],
+            )
+        else:
+            # Abstained: prose, or tool-ish content we will not turn into a call.
+            logger.info(f"[{trace_id}] abstained from repair (reason={decision.reason})")
+            _write_trace_event(trace_id, "abstain", model=model, reason=decision.reason)
 
-                rewritten = synthesize_tool_call_response(content_str, tool_calls, finish or "tool_calls")
-
-                # Preserve important fields
-                for key in ("id", "object", "created", "model", "usage", "system_fingerprint"):
-                    if key in data:
-                        rewritten[key] = data[key]
-                rewritten["model"] = model
-
-                await upstream.aclose()
-                resp = JSONResponse(content=rewritten)
-                resp.headers["x-local-tool-proxy-trace-id"] = trace_id
-                return resp
-
-    # No rewrite happened — return original
-    logger.info(f"[{trace_id}] No rewrite needed for {model} (rigid={is_rigid})")
+    # No rewrite emitted — return original (prose, abstention, or native pass-through)
+    logger.info(f"[{trace_id}] No rewrite emitted for {model} (rigid={is_rigid})")
 
     # === Gated diagnostic: actual model output (only when --debug-log-model-outputs) ===
     if DEBUG_LOG_MODEL_OUTPUTS:
@@ -920,6 +946,8 @@ async def _handle_tool_request_for_compat_model(
     await upstream.aclose()
     resp = Response(content=content, status_code=upstream.status_code)
     resp.headers["x-local-tool-proxy-trace-id"] = trace_id
+    if repair_reason:
+        resp.headers["x-local-tool-proxy-reason"] = repair_reason
     return resp
 
 

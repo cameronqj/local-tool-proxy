@@ -109,8 +109,12 @@ local-tool-proxy --trace-file traces/local-tool-proxy.jsonl
 ```
 
 Trace records include metadata such as trace id, model, mode, tool count,
-rewrite type, collapse category, and stabilization attempt result. They do not
-include raw prompts, tool schemas, or model output.
+rewrite type, collapse category, and stabilization attempt result. Repair and
+abstention events also carry a stable `reason` code (the same value exposed on
+the `x-local-tool-proxy-reason` response header) — for example
+`repaired_json_content` or `abstain_missing_required_args`. See the "Reason
+codes" table in the [README](../README.md) for the full set. Trace records do
+not include raw prompts, tool schemas, or model output.
 
 ## `--debug-log-model-outputs`
 

@@ -47,6 +47,9 @@ See [docs/experiment-log.md](docs/experiment-log.md) for the current evidence.
 - It does not log raw prompts by default.
 - It does not create tool intent when the model did not express any. If the
   model returns plain prose, the proxy leaves it as prose.
+- It does not fabricate a call from a tool *name* alone. If a required argument
+  is missing or empty, the tool is unknown, or the intent is ambiguous, the
+  proxy abstains and records why (see "Reason codes" below).
 
 ## How It Differs From LiteLLM and General Routers
 
@@ -81,11 +84,43 @@ What is demonstrated by tests and reproducible runs:
   XML-ish blocks) is repaired into valid OpenAI `tool_calls`.
 - Plain prose and unparseable content are **not** turned into fabricated tool
   calls.
-- Repairs and non-repairs are recorded as sanitized JSONL diagnostics that omit
-  raw prompts and model output.
+- A recovered call is validated against the *declared tool schema*. If a
+  required argument is missing or empty, the tool name is unknown, or several
+  tools are named without one clear invocation, the proxy **abstains** rather
+  than emit an incomplete or guessed call.
+- Every decision carries an explicit reason code (see below), and repairs and
+  abstentions are recorded as sanitized JSONL diagnostics that omit raw prompts
+  and model output.
 
-See [tests/test_claim_boundaries.py](tests/test_claim_boundaries.py) and the
-[demo transcript](docs/demo.md), both of which run with no live model.
+See [tests/test_claim_boundaries.py](tests/test_claim_boundaries.py),
+[tests/test_reason_codes.py](tests/test_reason_codes.py), and
+[tests/test_smoke_fake_upstream.py](tests/test_smoke_fake_upstream.py) — all of
+which run with no live model — plus the [demo transcript](docs/demo.md).
+
+### Reason codes
+
+Each tool turn on the compat path is labelled with one stable reason code,
+surfaced on the `x-local-tool-proxy-reason` response header and in trace events.
+They make the proxy's repair/abstain decisions auditable:
+
+| Reason code | Meaning |
+| --- | --- |
+| `valid_native_tool_call` | Upstream already returned valid `tool_calls`; passed through. |
+| `repaired_json_content` | Recovered a bare JSON object/array from content. |
+| `repaired_markdown_json` | Recovered a fenced JSON code block. |
+| `repaired_xml_tool_block` | Recovered an XML-ish `<tool_code>` / `<tool>` block. |
+| `repaired_toolname_snippet` | Recovered a `toolName{...}` snippet. |
+| `repaired_legacy_function_call` | Converted a legacy OpenAI `function_call` field. |
+| `abstain_no_tool_intent` | Plain prose; no tool structure to repair. |
+| `abstain_missing_required_args` | A required argument was absent. |
+| `abstain_invalid_arguments` | A required argument was present but empty/null. |
+| `abstain_unknown_tool` | The named tool was not declared in the request. |
+| `abstain_ambiguous_multiple_tools` | Several declared tools named without one clear call. |
+| `abstain_malformed_unrecoverable_json` | Tool-ish content too malformed to recover safely. |
+| `pass_through_no_tools_declared` | Request declared no tools to validate against. |
+
+A repair only happens for a complete, in-schema call. The `abstain_*` codes are
+the conservative half: the proxy declines to fabricate rather than guess.
 
 What is **not** claimed:
 
@@ -330,6 +365,16 @@ python3 -m pytest tests/test_integration_mock.py
 
 That test starts a mock upstream and a local proxy, then verifies that an OpenAI
 client receives proper `tool_calls`.
+
+Run the fake-upstream end-to-end smoke test (no live model, no network):
+
+```bash
+python3 -m pytest tests/test_smoke_fake_upstream.py
+```
+
+It puts the real proxy in front of a fake upstream over an in-process transport
+and checks that a malformed call is repaired, plain prose is passed through, and
+both reason codes land in the sanitized trace.
 
 See [docs/testing.md](docs/testing.md) for live harness evaluation notes.
 
